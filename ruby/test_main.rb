@@ -29,23 +29,27 @@ class MyAppTest < Minitest::Test
   def test_data_endpoint_when_cache_ready
     valid_data = { "value" => "real_data" }.to_json
     last_modified = Time.now.httpdate
+    etag = Digest::MD5.hexdigest(valid_data)
 
     MyApp.with_redis do |redis|
       redis.set(MyApp.cache_key, valid_data)
       redis.set("#{MyApp.cache_key}_last_modified", last_modified)
+      redis.set("#{MyApp.cache_key}_etag", etag)
     end
 
+    # First request to get the ETag
     get '/data'
     assert last_response.ok?, "Response should be OK, but was #{last_response.status}"
     assert_equal 'application/json', last_response.content_type
     assert_equal valid_data, last_response.body
     assert_equal last_modified, last_response.headers['Last-Modified']
-    assert_equal Digest::MD5.hexdigest(valid_data), last_response.headers['ETag']
+    assert_equal etag, last_response.headers['ETag']
 
-    # Second request with If-Modified-Since header
-    header 'If-Modified-Since', last_modified
+    # Second request with If-None-Match header
+    header 'If-None-Match', etag
     get '/data'
     assert_equal 304, last_response.status, "Response should be 304 Not Modified, but was #{last_response.status}"
+    assert_empty last_response.body
   end
 
   def test_data_endpoint_when_cache_not_ready
