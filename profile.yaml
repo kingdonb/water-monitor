@@ -26,3 +26,8 @@ repository:
       branch: main
     def:
       dismiss_stale_reviews: true
+  - type: branch_protection_allow_force_pushes
+    params:
+      branch: main
+    def:
+      allow_force_pushes: false
