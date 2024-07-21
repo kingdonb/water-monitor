@@ -1,0 +1,18 @@
+version: v1
+type: profile
+name: github-profile
+context:
+  provider: github
+alert: "on"
+remediate: "on"
+repository:
+  # - type: secret_scanning
+  #   name: "secret_scanning_github" # Optional, as there aren't multiple rules
+  #                                  # of the same type under the entity - repository
+  #   def:
+  #     enabled: true
+  - type: dependabot_configured
+    def:
+      package_ecosystem: pypi
+      schedule_interval: weekly
+      apply_if_file: requirements.txt
