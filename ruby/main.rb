@@ -5,6 +5,8 @@ require 'net/http'
 require 'json'
 require 'concurrent'
 
+# The log level is now set in logger.rb
+
 module CacheHelpers
   include Loggable
 
@@ -222,9 +224,6 @@ class MyApp < Sinatra::Base
 
   at_exit { MyApp.shutdown }
 end
-
-# Set log level based on environment variable
-MyApp.set_log_level(ENV['LOG_LEVEL']&.to_sym || :info)
 
 # Start the application and threads after the class definition
 server_thread = Thread.new do

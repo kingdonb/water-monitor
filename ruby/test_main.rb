@@ -1,9 +1,12 @@
-require 'minitest/autorun'
+require 'bundler/setup'
 require 'rack/test'
+require 'minitest/autorun'
 require 'mocha/minitest'
+require_relative 'logger'
 require_relative 'main'
 
-Logging.log_level = :error
+# Set the log level for tests
+Loggable.set_log_level(:error)
 
 class MyAppTest < Minitest::Test
   include Rack::Test::Methods
@@ -38,7 +41,10 @@ class MyAppTest < Minitest::Test
   end
 
   def test_cache_update_via_listener_thread
-    Logging.log_level = :debug  # Temporarily enable debug logging
+    # Temporarily enable debug logging for this test
+    original_log_level = Loggable.log_level
+    Loggable.set_log_level(:debug)
+
     MyApp.stubs(:fetch_data).returns({ "value" => "real_data" })
 
     MyApp.start_threads
@@ -55,7 +61,8 @@ class MyAppTest < Minitest::Test
     parsed_data = JSON.parse(cached_data)
     assert_equal "real_data", parsed_data["value"]
   ensure
-    Logging.log_level = :error  # Reset log level
+    # Reset log level
+    Loggable.set_log_level(original_log_level)
   end
 
   def test_lock_timeout
