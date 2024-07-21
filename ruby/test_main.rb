@@ -16,11 +16,15 @@ class MyAppTest < Minitest::Test
   end
 
   def setup
-    # mock_redis.flushdb
+    MyApp.redis = mock_redis
+    MyApp.lock_key = "update_lock"
+    MyApp.cache_key = "cached_data"
+    MyApp.lock_cv = ConditionVariable.new
+    MyApp.lock_mutex = Mutex.new
   end
 
   def teardown
-    # mock_redis.flushdb
+    mock_redis.flushdb
   end
 
   def test_data_endpoint_when_cache_ready
