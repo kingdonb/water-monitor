@@ -6,6 +6,7 @@ require 'json'
 require 'concurrent'
 require 'digest/md5'
 require 'connection_pool'
+require 'zlib'
 
 # Set the log level for the Loggable module
 Loggable.set_log_level(ENV['LOG_LEVEL'])
@@ -80,12 +81,23 @@ module CacheHelpers
       return
     end
     json_data = data.to_json
+    compressed_data = StringIO.new.tap do |io|
+      gz = Zlib::GzipWriter.new(io, COMPRESSION_LEVEL)
+      gz.write(json_data)
+      gz.close
+    end.string
+    etag = Digest::MD5.hexdigest(json_data)
     with_redis do |redis|
       redis.set(self.class.cache_key, json_data)
+      redis.set("#{self.class.cache_key}_compressed", compressed_data)
       redis.set("#{self.class.cache_key}_last_modified", Time.now.httpdate)
+      redis.set("#{self.class.cache_key}_etag", etag)
       redis.expire(self.class.cache_key, 86460) # Set TTL to 24 hours + 1 minute
+      redis.expire("#{self.class.cache_key}_compressed", 86460)
+      redis.expire("#{self.class.cache_key}_last_modified", 86460)
+      redis.expire("#{self.class.cache_key}_etag", 86460)
     end
-    debu("Cache updated, new value: #{json_data}")
+    debu("Cache updated, new value size: #{json_data.bytesize} bytes, compressed size: #{compressed_data.bytesize} bytes")
     release_lock
     debu("Cache updated and lock released")
     cache_updated
@@ -215,27 +227,76 @@ class MyApp < Sinatra::Base
     end
   end
 
+  COMPRESSION_LEVEL = Zlib::BEST_COMPRESSION
+
   get '/data' do
     debu("Received request at /data")
+    debu("If-None-Match: #{request.env['HTTP_IF_NONE_MATCH']}")
+    debu("If-Modified-Since: #{request.env['HTTP_IF_MODIFIED_SINCE']}")
+    debu("Cache-Control: #{request.env['HTTP_CACHE_CONTROL']}")
+    
+    accept_encoding = request.env['HTTP_ACCEPT_ENCODING'] || request.env['Accept-Encoding']
+    debu("Accept-Encoding: #{accept_encoding}")
+    debu("Raw headers: #{request.env.select { |k, v| k.start_with?('HTTP_') }}")
+
     begin
       if cache_ready?
         content_type :json
         cached_data = with_redis { |redis| redis.get(self.class.cache_key) }
+        compressed_data = with_redis { |redis| redis.get("#{self.class.cache_key}_compressed") }
         last_modified = with_redis { |redis| redis.get("#{self.class.cache_key}_last_modified") }
-        etag = Digest::MD5.hexdigest(cached_data)
+        etag = with_redis { |redis| redis.get("#{self.class.cache_key}_etag") }
+
+        if etag.nil?
+          etag = Digest::MD5.hexdigest(cached_data)
+          with_redis do |redis|
+            redis.set("#{self.class.cache_key}_etag", etag)
+          end
+        end
 
         # Set caching headers
         headers['Last-Modified'] = last_modified if last_modified
         headers['ETag'] = etag
+        headers['Cache-Control'] = 'public, max-age=86400, must-revalidate'
+        headers['Vary'] = 'Accept-Encoding'
 
         # Check if the client's cached version is still valid
-        if stale?(etag: etag, last_modified: last_modified)
-          debu("Serving cached data. Size: #{cached_data.bytesize} bytes")
-          status 200
-          body cached_data
-        else
-          status 304
+        client_etag = request.env['HTTP_IF_NONE_MATCH']
+        if client_etag.nil?
+          warn("Client did not send If-None-Match header. This might be due to the first request or browser cache settings.")
+          debu("Raw headers: #{request.env.select { |k, v| k.start_with?('HTTP_') }}")
         end
+        if client_etag && client_etag == etag
+          debu("Cache hit: Client cache is still valid, returning 304")
+          status 304
+          return
+        else
+          debu("Cache miss: Client cache is stale or non-existent")
+        end
+
+        if compressed_data.nil?
+          debu("Compressed data not found in cache, compressing now")
+          compressed_data = StringIO.new.tap do |io|
+            gz = Zlib::GzipWriter.new(io, COMPRESSION_LEVEL)
+            gz.write(cached_data)
+            gz.close
+          end.string
+          with_redis do |redis|
+            redis.set("#{self.class.cache_key}_compressed", compressed_data)
+          end
+        end
+
+        if accept_encoding&.include?('gzip')
+          headers['Content-Encoding'] = 'gzip'
+          response_body = compressed_data
+          debu("Serving compressed data (gzip). Size: #{response_body.bytesize} bytes")
+        else
+          response_body = cached_data
+          debu("Serving uncompressed data. Size: #{response_body.bytesize} bytes")
+        end
+
+        status 200
+        body response_body
       else
         debu("Cache not ready or contains test data, publishing please_update_now message")
         with_redis { |redis| redis.publish("please_update_now", "true") }
@@ -326,12 +387,23 @@ class MyApp < Sinatra::Base
       return
     end
     json_data = data.to_json
+    compressed_data = StringIO.new.tap do |io|
+      gz = Zlib::GzipWriter.new(io, COMPRESSION_LEVEL)
+      gz.write(json_data)
+      gz.close
+    end.string
+    etag = Digest::MD5.hexdigest(json_data)
     with_redis do |redis|
       redis.set(cache_key, json_data)
+      redis.set("#{cache_key}_compressed", compressed_data)
       redis.set("#{cache_key}_last_modified", Time.now.httpdate)
+      redis.set("#{cache_key}_etag", etag)
       redis.expire(cache_key, 86460) # Set TTL to 24 hours + 1 minute
+      redis.expire("#{cache_key}_compressed", 86460)
+      redis.expire("#{cache_key}_last_modified", 86460)
+      redis.expire("#{cache_key}_etag", 86460)
     end
-    debu("Cache updated, new value: #{json_data}")
+    debu("Cache updated, new value size: #{json_data.bytesize} bytes, compressed size: #{compressed_data.bytesize} bytes")
     release_lock
     debu("Cache updated and lock released")
     cache_updated
