@@ -22,10 +22,6 @@ jobs:
         with:
           ruby-version: 3.3.4
           bundler-cache: true
-
-      - name: Install dependencies
-        run: bundle install
-        with:
           working-directory: ruby/
 
       - name: Run tests
