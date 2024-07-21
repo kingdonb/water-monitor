@@ -234,7 +234,7 @@ class MyApp < Sinatra::Base
     debu("If-None-Match: #{request.env['HTTP_IF_NONE_MATCH']}")
     debu("If-Modified-Since: #{request.env['HTTP_IF_MODIFIED_SINCE']}")
     debu("Cache-Control: #{request.env['HTTP_CACHE_CONTROL']}")
-    
+
     accept_encoding = request.env['HTTP_ACCEPT_ENCODING'] || request.env['Accept-Encoding']
     debu("Accept-Encoding: #{accept_encoding}")
     debu("Raw headers: #{request.env.select { |k, v| k.start_with?('HTTP_') }}")
