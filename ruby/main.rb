@@ -114,24 +114,38 @@ class MyApp < Sinatra::Base
   include Loggable
 
   class << self
-    attr_accessor :redis, :lock_key, :cache_key
+    attr_accessor :redis, :lock_key, :cache_key, :lock_cv, :lock_mutex
+  end
+
+  def initialize(app = nil, redis_instance = nil)
+    super(app)
+    self.class.redis = redis_instance || Redis.new
+    self.class.lock_key = "update_lock"
+    self.class.cache_key = "cached_data"
+    self.class.lock_cv = ConditionVariable.new
+    self.class.lock_mutex = Mutex.new
+    @threads_started = false
   end
 
   configure do
-    begin
-      MyApp.redis = Redis.new
-      MyApp.redis.ping
-      info("Connected to Redis")
-    rescue => e
-      error("Failed to connect to Redis: #{e.message}")
-      exit 1
-    end
+    set :redis, Redis.new unless settings.respond_to?(:redis)
+  end
 
-    MyApp.lock_key = "update_lock"
-    MyApp.cache_key = "cached_data"
-    @@threads_started = false
-    @@cache_updated_cv = ConditionVariable.new
-    @@cache_updated_mutex = Mutex.new
+  def self.acquire_lock(timeout = LOCK_TIMEOUT)
+    lock_mutex.synchronize do
+      acquired = redis.set(lock_key, true, nx: true, px: timeout)
+      debug("Lock acquisition attempt result: #{acquired}")
+      lock_cv.signal if acquired
+      acquired
+    end
+  end
+
+  def self.release_lock
+    lock_mutex.synchronize do
+      redis.del(lock_key)
+      debug("Lock released")
+      lock_cv.signal
+    end
   end
 
   get '/data' do
@@ -150,14 +164,14 @@ class MyApp < Sinatra::Base
   end
 
   def self.start_threads
-    return if @@threads_started
+    return if @threads_started
 
     @cron_thread = Thread.new do
       debug("Starting cron_thread")
       loop do
         sleep 86400  # 24 hours
         debug("cron_thread woke up")
-        if !cache_ready? || (Time.now.to_i - MyApp.redis.ttl(MyApp.cache_key)) > 86400  # Check if cache is stale
+        if !cache_ready? || (Time.now.to_i - redis.ttl(cache_key)) > 86400  # Check if cache is stale
           debug("Cache is stale or not ready")
           if acquire_lock
             update_cache
@@ -169,7 +183,7 @@ class MyApp < Sinatra::Base
     @listener_thread = Thread.new do
       debug("Starting listener_thread")
       begin
-        MyApp.redis.subscribe("please_update_now") do |on|
+        redis.subscribe("please_update_now") do |on|
           on.message do |channel, message|
             debug("Received message on please_update_now: #{message}")
             if message == "true"
@@ -190,7 +204,7 @@ class MyApp < Sinatra::Base
       end
     end
 
-    @@threads_started = true
+    @threads_started = true
   end
 
   def self.shutdown
@@ -201,10 +215,10 @@ class MyApp < Sinatra::Base
   end
 
   def self.debug_info
-    debug("Threads started: #{@@threads_started}")
+    debug("Threads started: #{@threads_started}")
     debug("Listener thread alive: #{@listener_thread&.alive?}")
-    debug("Cache exists: #{MyApp.redis.exists(MyApp.cache_key)}")
-    debug("Lock exists: #{MyApp.redis.exists(MyApp.lock_key)}")
+    debug("Cache exists: #{redis.exists(cache_key)}")
+    debug("Lock exists: #{redis.exists(lock_key)}")
   end
 
   def self.update_cache
@@ -220,6 +234,20 @@ class MyApp < Sinatra::Base
     release_lock
     debug("Cache updated and lock released")
     cache_updated
+  end
+
+  def on_message(channel, message)
+    debug("Received message on #{channel}: #{message}")
+    if channel == "please_update_now" && message == "true"
+      if self.class.acquire_lock
+        debug("Lock acquired in listener thread, updating cache")
+        self.class.update_cache
+      else
+        debug("Failed to acquire lock in listener thread")
+      end
+    else
+      debug("Unexpected message: #{message}")
+    end
   end
 
   at_exit { MyApp.shutdown }
