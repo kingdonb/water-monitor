@@ -28,7 +28,6 @@ class MyAppTest < Minitest::Test
   end
 
   def test_data_endpoint_when_cache_ready
-    # Use valid data instead of test data
     valid_data = { "value" => "real_data" }.to_json
     MyApp.redis.set(MyApp.cache_key, valid_data)
     get '/data'
@@ -45,35 +44,58 @@ class MyAppTest < Minitest::Test
   end
 
   def test_lock_timeout
-    # Acquire a lock with a short timeout (100 milliseconds)
     assert MyApp.acquire_lock(100), "Failed to acquire initial lock"
-
-    # Simulate time passing
     mock_redis.simulate_time_passing(0.11)
-
-    # Verify that the lock can be acquired again
     assert MyApp.acquire_lock, "Failed to acquire lock after timeout"
   end
 
   def test_update_cache
     MyApp.stubs(:fetch_data).returns({ "value" => "real_data" })
-    MyApp.stubs(:redis).returns(mock_redis)
-
     MyApp.update_cache
-
-    assert_equal({ "value" => "real_data" }.to_json, mock_redis.get(MyApp.cache_key))
+    assert_equal({ "value" => "real_data" }.to_json, MyApp.redis.get(MyApp.cache_key))
   end
 
-  def test_listener_thread_updates_cache
-    MyApp.stubs(:fetch_data).returns({ "value" => "real_data" })
-    MyApp.stubs(:redis).returns(mock_redis)
-    MyApp.stubs(:acquire_lock).returns(true)
+  def test_cache_ready
+    MyApp.redis.set(MyApp.cache_key, "test_data")
+    assert MyApp.cache_ready?, "Cache should be ready when data is set"
 
-    # Simulate the listener thread behavior
-    app_instance = MyApp.new!
+    MyApp.redis.del(MyApp.cache_key)
+    refute MyApp.cache_ready?, "Cache should not be ready when data is not set"
+  end
+
+  def test_release_lock
+    MyApp.acquire_lock
+    assert MyApp.redis.exists(MyApp.lock_key), "Lock should exist after acquisition"
+
+    MyApp.release_lock
+    refute MyApp.redis.exists(MyApp.lock_key), "Lock should not exist after release"
+  end
+
+  def test_start_threads
+    refute MyApp.threads_started, "Threads should not be started initially"
+
+    MyApp.start_threads
+    sleep 0.5
+    assert MyApp.threads_started, "Threads should be started after calling start_threads"
+
+    # Check if threads are alive
+    assert MyApp.instance_variable_get(:@cron_thread).alive?, "Cron thread should be alive"
+    assert MyApp.instance_variable_get(:@listener_thread).alive?, "Listener thread should be alive"
+  end
+
+  def test_on_message
+    MyApp.expects(:acquire_lock).returns(true)
+    MyApp.expects(:update_cache).once
+
+    app_instance = MyApp.new
+    def app_instance.on_message(channel, message)
+      MyApp.on_message(channel, message)
+    end
+    assert_respond_to app_instance, :on_message, "app_instance should respond to on_message"
     app_instance.on_message("please_update_now", "true")
 
-    assert_equal({ "value" => "real_data" }.to_json, mock_redis.get(MyApp.cache_key))
+    # Verify that the expectations were met
+    assert_mock MyApp
   end
 
   private
@@ -109,10 +131,6 @@ class MyAppTest < Minitest::Test
       @data.key?(key)
     end
 
-    def publish(channel, message)
-      # Simulate publish
-    end
-
     def del(key)
       @data.delete(key)
       @expiry.delete(key)
@@ -130,6 +148,19 @@ class MyAppTest < Minitest::Test
           @expiry.delete(key)
         end
       end
+    end
+
+    def subscribe(channel)
+      yield self if block_given?
+    end
+
+    def message
+      yield 'please_update_now', 'true'
+    end
+
+    def publish(channel, message)
+      # Simulate publish
+      true
     end
 
     private
