@@ -1,5 +1,5 @@
 module Loggable
-  LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 }
+  LOG_LEVELS = { debug: 0, info: 1, warn: 2, erro: 3 }
 
   def self.included(base)
     base.extend(ClassMethods)
@@ -18,7 +18,7 @@ module Loggable
 
   extend ClassMethods
 
-  [:debug, :info, :warn, :error].each do |level|
+  [:debug, :info, :warn, :erro].each do |level|
     define_method(level) do |message|
       log(level, message)
     end
@@ -33,8 +33,10 @@ module Loggable
   end
 
   def current_log_level
-    self.class.instance_variable_get(:@log_level) || LOG_LEVELS[:info]
+    if self.class.singleton_class.included_modules.include?(Loggable)
+      self.class.instance_variable_get(:@log_level) || LOG_LEVELS[:info]
+    else
+      self.class.ancestors.find { |a| a.instance_variable_defined?(:@log_level) }&.instance_variable_get(:@log_level) || LOG_LEVELS[:info]
+    end
   end
 end
-
-Loggable.set_log_level(ENV['LOG_LEVEL']&.to_sym || :info)

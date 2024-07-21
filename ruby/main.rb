@@ -4,8 +4,10 @@ require 'redis'
 require 'net/http'
 require 'json'
 require 'concurrent'
+require 'digest/md5'
 
-# The log level is now set in logger.rb
+# Set the log level for the Loggable module
+Loggable.set_log_level(ENV['LOG_LEVEL']&.to_sym || :info)
 
 module CacheHelpers
   include Loggable
@@ -49,17 +51,14 @@ module CacheHelpers
     data = fetch_data
     debug("Data fetched: #{data.inspect}")
     if data.nil? || data.empty?
-      error("Error: Fetched data is nil or empty")
+      erro("Error: Fetched data is nil or empty")
       return
     end
     json_data = data.to_json
     redis.set(cache_key, json_data)
-    debug("Cache updated. New value size: #{json_data.bytesize} bytes")
-    if json_data.bytesize <= 400
-      debug("New cache value: #{json_data}")
-    else
-      debug("New cache value too large to print (> 400 bytes)")
-    end
+    redis.set("#{cache_key}_last_modified", Time.now.httpdate)
+    redis.expire(cache_key, 86460) # Set TTL to 24 hours + 1 minute
+    debug("Cache updated, new value: #{json_data}")
     release_lock
     debug("Cache updated and lock released")
     cache_updated
@@ -82,11 +81,11 @@ module CacheHelpers
       end
       data
     else
-      error("Error fetching data: #{response.code} #{response.message}")
+      erro("Error fetching data: #{response.code} #{response.message}")
       nil
     end
   rescue => e
-    error("Exception while fetching data: #{e.message}")
+    erro("Exception while fetching data: #{e.message}")
     nil
   end
 
@@ -150,16 +149,36 @@ class MyApp < Sinatra::Base
 
   get '/data' do
     debug("Received request at /data")
-    if cache_ready?
-      content_type :json
-      cached_data = MyApp.redis.get(MyApp.cache_key)
-      debug("Serving cached data. Size: #{cached_data.bytesize} bytes")
-      cached_data
-    else
-      debug("Cache not ready or contains test data, publishing please_update_now message")
-      MyApp.redis.publish("please_update_now", "true")
-      status 202
-      body "Cache is updating, please try again later."
+    begin
+      if cache_ready?
+        content_type :json
+        cached_data = MyApp.redis.get(MyApp.cache_key)
+        last_modified = MyApp.redis.get("#{MyApp.cache_key}_last_modified")
+        etag = Digest::MD5.hexdigest(cached_data)
+
+        # Set caching headers
+        headers['Last-Modified'] = last_modified if last_modified
+        headers['ETag'] = etag
+
+        # Check if the client's cached version is still valid
+        if stale?(etag: etag, last_modified: last_modified)
+          debug("Serving cached data. Size: #{cached_data.bytesize} bytes")
+          status 200
+          body cached_data
+        else
+          status 304
+        end
+      else
+        debug("Cache not ready or contains test data, publishing please_update_now message")
+        MyApp.redis.publish("please_update_now", "true")
+        status 202
+        body "Cache is updating, please try again later."
+      end
+    rescue => e
+      erro("Error in /data route: #{e.message}")
+      erro(e.backtrace.join("\n"))
+      status 500
+      body "An error occurred while processing your request."
     end
   end
 
@@ -199,8 +218,8 @@ class MyApp < Sinatra::Base
           end
         end
       rescue => e
-        error("Failed to subscribe to Redis channel: #{e.message}")
-        error(e.backtrace.join("\n"))
+        erro("Failed to subscribe to Redis channel: #{e.message}")
+        erro(e.backtrace.join("\n"))
       end
     end
 
@@ -226,11 +245,14 @@ class MyApp < Sinatra::Base
     data = fetch_data
     debug("Data fetched: #{data.inspect}")
     if data.nil? || data.empty?
-      error("Error: Fetched data is nil or empty")
+      erro("Error: Fetched data is nil or empty")
       return
     end
-    redis.set(cache_key, data.to_json)
-    debug("Cache updated, new value: #{redis.get(cache_key)}")
+    json_data = data.to_json
+    redis.set(cache_key, json_data)
+    redis.set("#{cache_key}_last_modified", Time.now.httpdate)
+    redis.expire(cache_key, 86460) # Set TTL to 24 hours + 1 minute
+    debug("Cache updated, new value: #{json_data}")
     release_lock
     debug("Cache updated and lock released")
     cache_updated
@@ -250,10 +272,33 @@ class MyApp < Sinatra::Base
     end
   end
 
+  helpers do
+    def stale?(options)
+      etag = options[:etag]
+      last_modified = options[:last_modified]
+
+      if_none_match = request.env['HTTP_IF_NONE_MATCH']
+      if_modified_since = request.env['HTTP_IF_MODIFIED_SINCE']
+
+      return true if if_none_match.nil? && if_modified_since.nil?
+
+      if if_none_match && etag
+        return false if if_none_match == etag
+      elsif if_modified_since && last_modified
+        return false if Time.parse(if_modified_since) >= Time.parse(last_modified)
+      end
+
+      true
+    end
+  end
+
   at_exit { MyApp.shutdown }
 end
 
-# Start the application and threads after the class definition
+# Set the log level for MyApp
+MyApp.set_log_level(ENV['LOG_LEVEL']&.to_sym || :info)
+
+# Start the application and threads after setting the log level
 server_thread = Thread.new do
   MyApp.run! if MyApp.app_file == $0
 end
