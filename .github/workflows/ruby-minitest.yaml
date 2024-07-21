@@ -23,12 +23,11 @@ jobs:
           ruby-version: 3.3.4
           bundler-cache: true
 
-      - name: Change directory to ruby
-        run: cd ruby
-
       - name: Install dependencies
         run: bundle install
+        with:
+          working-directory: ruby/
 
       - name: Run tests
-        run: bundle exec ruby test_main.rb
+        run: cd ruby && bundle exec ruby test_main.rb
 
