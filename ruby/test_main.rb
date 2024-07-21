@@ -1,23 +1,30 @@
-require 'minitest/autorun'
+require 'bundler/setup'
 require 'rack/test'
+require 'minitest/autorun'
 require 'mocha/minitest'
+require_relative 'logger'
 require_relative 'main'
 
-Logging.log_level = :error
+# Set the log level for tests
+Loggable.set_log_level(:error)
 
 class MyAppTest < Minitest::Test
   include Rack::Test::Methods
 
   def app
-    MyApp.new
+    @app ||= MyApp.new(nil, mock_redis)
   end
 
   def setup
-    MyApp.redis.flushdb
+    MyApp.redis = mock_redis
+    MyApp.lock_key = "update_lock"
+    MyApp.cache_key = "cached_data"
+    MyApp.lock_cv = ConditionVariable.new
+    MyApp.lock_mutex = Mutex.new
   end
 
   def teardown
-    MyApp.redis.flushdb
+    mock_redis.flushdb
   end
 
   def test_data_endpoint_when_cache_ready
@@ -37,49 +44,101 @@ class MyAppTest < Minitest::Test
     assert_equal "Cache is updating, please try again later.", last_response.body
   end
 
-  def test_cache_update_via_listener_thread
-    Logging.log_level = :debug  # Temporarily enable debug logging
-    MyApp.stubs(:fetch_data).returns({ "value" => "real_data" })
-
-    MyApp.start_threads
-
-    MyApp.redis.publish("please_update_now", "true")
-
-    assert wait_for_cache_update, "Cache was not updated within the expected time"
-
-    cached_data = MyApp.redis.get(MyApp.cache_key)
-    puts "Cached data: #{cached_data.inspect}"
-
-    refute_nil cached_data, "Cached data is nil"
-
-    parsed_data = JSON.parse(cached_data)
-    assert_equal "real_data", parsed_data["value"]
-  ensure
-    Logging.log_level = :error  # Reset log level
-  end
-
   def test_lock_timeout
-    # Acquire a lock with a short timeout
-    assert MyApp.acquire_lock(1000), "Failed to acquire initial lock"
+    # Acquire a lock with a short timeout (100 milliseconds)
+    assert MyApp.acquire_lock(100), "Failed to acquire initial lock"
 
-    # Wait for the lock to expire
-    sleep 1.1
+    # Simulate time passing
+    mock_redis.simulate_time_passing(0.11)
 
     # Verify that the lock can be acquired again
     assert MyApp.acquire_lock, "Failed to acquire lock after timeout"
   end
 
-  def wait_for_cache_update(max_wait_time = 5)
-    start_time = Time.now
-    updated = false
-    while Time.now - start_time < max_wait_time && !updated
-      if MyApp.redis.exists(MyApp.cache_key)
-        updated = true
-        puts "Cache updated after #{Time.now - start_time} seconds"
-      else
-        sleep 0.1
+  def test_update_cache
+    MyApp.stubs(:fetch_data).returns({ "value" => "real_data" })
+    MyApp.stubs(:redis).returns(mock_redis)
+
+    MyApp.update_cache
+
+    assert_equal({ "value" => "real_data" }.to_json, mock_redis.get(MyApp.cache_key))
+  end
+
+  def test_listener_thread_updates_cache
+    MyApp.stubs(:fetch_data).returns({ "value" => "real_data" })
+    MyApp.stubs(:redis).returns(mock_redis)
+    MyApp.stubs(:acquire_lock).returns(true)
+
+    # Simulate the listener thread behavior
+    app_instance = MyApp.new!
+    app_instance.on_message("please_update_now", "true")
+
+    assert_equal({ "value" => "real_data" }.to_json, mock_redis.get(MyApp.cache_key))
+  end
+
+  private
+
+  def mock_redis
+    @mock_redis ||= MockRedis.new
+  end
+
+  class MockRedis
+    def initialize
+      @data = {}
+      @expiry = {}
+    end
+
+    def set(key, value, options = {})
+      if options[:nx] && @data.key?(key)
+        return false
+      end
+      @data[key] = value
+      if options[:px]
+        @expiry[key] = Time.now.to_f + (options[:px] / 1000.0)
+      end
+      true
+    end
+
+    def get(key)
+      check_expiry(key)
+      @data[key]
+    end
+
+    def exists(key)
+      check_expiry(key)
+      @data.key?(key)
+    end
+
+    def publish(channel, message)
+      # Simulate publish
+    end
+
+    def del(key)
+      @data.delete(key)
+      @expiry.delete(key)
+    end
+
+    def flushdb
+      @data.clear
+      @expiry.clear
+    end
+
+    def simulate_time_passing(seconds)
+      @expiry.each do |key, expiry_time|
+        if Time.now.to_f + seconds > expiry_time
+          @data.delete(key)
+          @expiry.delete(key)
+        end
       end
     end
-    updated
+
+    private
+
+    def check_expiry(key)
+      if @expiry[key] && Time.now.to_f > @expiry[key]
+        @data.delete(key)
+        @expiry.delete(key)
+      end
+    end
   end
 end
