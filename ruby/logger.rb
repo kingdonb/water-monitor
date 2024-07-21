@@ -1,5 +1,5 @@
 module Loggable
-  LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 }
+  LOG_LEVELS = { debu: 0, info: 1, warn: 2, erro: 3 }
 
   def self.included(base)
     base.extend(ClassMethods)
@@ -8,7 +8,11 @@ module Loggable
 
   module ClassMethods
     def set_log_level(level)
-      @log_level = LOG_LEVELS[level] || LOG_LEVELS[:info]
+      level = level&.[](...4)&.to_sym || level || :info
+      unless LOG_LEVELS.key?(level)
+        raise ArgumentError, "Invalid log level: #{level}"
+      end
+      @log_level = LOG_LEVELS[level]
     end
 
     def log_level
@@ -18,7 +22,7 @@ module Loggable
 
   extend ClassMethods
 
-  [:debug, :info, :warn, :error].each do |level|
+  [:debu, :info, :warn, :erro].each do |level|
     define_method(level) do |message|
       log(level, message)
     end
@@ -33,8 +37,10 @@ module Loggable
   end
 
   def current_log_level
-    self.class.instance_variable_get(:@log_level) || LOG_LEVELS[:info]
+    if self.class.singleton_class.included_modules.include?(Loggable)
+      self.class.instance_variable_get(:@log_level) || LOG_LEVELS[:info]
+    else
+      self.class.ancestors.find { |a| a.instance_variable_defined?(:@log_level) }&.instance_variable_get(:@log_level) || LOG_LEVELS[:info]
+    end
   end
 end
-
-Loggable.set_log_level(ENV['LOG_LEVEL']&.to_sym || :info)
