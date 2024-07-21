@@ -25,16 +25,16 @@ module CacheHelpers
 
   def cache_ready?
     with_redis do |redis|
-      cached_data = redis.get(self.class.cache_key)
-      last_modified = redis.get("#{self.class.cache_key}_last_modified")
+      cached_data = redis.get(cache_key)
+      compressed_data = redis.get("#{cache_key}_compressed")
+      last_modified = redis.get("#{cache_key}_last_modified")
+      etag = redis.get("#{cache_key}_etag")
 
-      if cached_data.nil? || cached_data.empty?
-        debu("Cache not ready: data is nil or empty")
-        return false
-      end
-
-      if last_modified.nil?
-        debu("Cache not ready: last_modified is nil")
+      if cached_data.nil? || cached_data.empty? ||
+         compressed_data.nil? || compressed_data.empty? ||
+         last_modified.nil? || last_modified.empty? ||
+         etag.nil? || etag.empty?
+        debu("Cache not ready: one or more required fields are missing or empty")
         return false
       end
 
@@ -48,6 +48,9 @@ module CacheHelpers
       debu("Cache ready: #{ready}")
       ready
     end
+  rescue => e
+    erro("Error checking cache readiness: #{e.message}")
+    false
   end
 
   def is_test_data?(data)
@@ -59,7 +62,7 @@ module CacheHelpers
 
   def acquire_lock(timeout = LOCK_TIMEOUT)
     with_redis do |redis|
-      acquired = redis.set(self.class.lock_key, true, nx: true, px: timeout)
+      acquired = redis.set(lock_key, true, nx: true, px: timeout)
       debu("Lock acquisition attempt result: #{acquired}")
       acquired
     end
@@ -67,7 +70,7 @@ module CacheHelpers
 
   def release_lock
     with_redis do |redis|
-      redis.del(self.class.lock_key)
+      redis.del(lock_key)
     end
     debu("Lock released")
   end
@@ -87,15 +90,16 @@ module CacheHelpers
       gz.close
     end.string
     etag = Digest::MD5.hexdigest(json_data)
+    current_time = Time.now.httpdate
     with_redis do |redis|
-      redis.set(self.class.cache_key, json_data)
-      redis.set("#{self.class.cache_key}_compressed", compressed_data)
-      redis.set("#{self.class.cache_key}_last_modified", Time.now.httpdate)
-      redis.set("#{self.class.cache_key}_etag", etag)
-      redis.expire(self.class.cache_key, 86460) # Set TTL to 24 hours + 1 minute
-      redis.expire("#{self.class.cache_key}_compressed", 86460)
-      redis.expire("#{self.class.cache_key}_last_modified", 86460)
-      redis.expire("#{self.class.cache_key}_etag", 86460)
+      redis.set(cache_key, json_data)
+      redis.set("#{cache_key}_compressed", compressed_data)
+      redis.set("#{cache_key}_last_modified", current_time)
+      redis.set("#{cache_key}_etag", etag)
+      redis.expire(cache_key, 86460) # Set TTL to 24 hours + 1 minute
+      redis.expire("#{cache_key}_compressed", 86460)
+      redis.expire("#{cache_key}_last_modified", 86460)
+      redis.expire("#{cache_key}_etag", 86460)
     end
     debu("Cache updated, new value size: #{json_data.bytesize} bytes, compressed size: #{compressed_data.bytesize} bytes")
     release_lock
@@ -182,15 +186,15 @@ class MyApp < Sinatra::Base
   def self.cache_ready?
     with_redis do |redis|
       cached_data = redis.get(cache_key)
+      compressed_data = redis.get("#{cache_key}_compressed")
       last_modified = redis.get("#{cache_key}_last_modified")
+      etag = redis.get("#{cache_key}_etag")
 
-      if cached_data.nil? || cached_data.empty?
-        debu("Cache not ready: data is nil or empty")
-        return false
-      end
-
-      if last_modified.nil?
-        debu("Cache not ready: last_modified is nil")
+      if cached_data.nil? || cached_data.empty? ||
+         compressed_data.nil? || compressed_data.empty? ||
+         last_modified.nil? || last_modified.empty? ||
+         etag.nil? || etag.empty?
+        debu("Cache not ready: one or more required fields are missing or empty")
         return false
       end
 
@@ -204,6 +208,16 @@ class MyApp < Sinatra::Base
       debu("Cache ready: #{ready}")
       ready
     end
+  rescue => e
+    erro("Error checking cache readiness: #{e.message}")
+    false
+  end
+
+  def self.is_test_data?(data)
+    parsed = JSON.parse(data)
+    parsed.is_a?(Hash) && parsed.keys == ["test"] && parsed["test"] == "data"
+  rescue JSON::ParserError
+    false
   end
 
   def self.acquire_lock(timeout = LOCK_TIMEOUT)
@@ -262,10 +276,6 @@ class MyApp < Sinatra::Base
 
         # Check if the client's cached version is still valid
         client_etag = request.env['HTTP_IF_NONE_MATCH']
-        if client_etag.nil?
-          warn("Client did not send If-None-Match header. This might be due to the first request or browser cache settings.")
-          debu("Raw headers: #{request.env.select { |k, v| k.start_with?('HTTP_') }}")
-        end
         if client_etag && client_etag == etag
           debu("Cache hit: Client cache is still valid, returning 304")
           status 304
@@ -393,10 +403,11 @@ class MyApp < Sinatra::Base
       gz.close
     end.string
     etag = Digest::MD5.hexdigest(json_data)
+    current_time = Time.now.httpdate
     with_redis do |redis|
       redis.set(cache_key, json_data)
       redis.set("#{cache_key}_compressed", compressed_data)
-      redis.set("#{cache_key}_last_modified", Time.now.httpdate)
+      redis.set("#{cache_key}_last_modified", current_time)
       redis.set("#{cache_key}_etag", etag)
       redis.expire(cache_key, 86460) # Set TTL to 24 hours + 1 minute
       redis.expire("#{cache_key}_compressed", 86460)

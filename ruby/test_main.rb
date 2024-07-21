@@ -30,12 +30,21 @@ class MyAppTest < Minitest::Test
     valid_data = { "value" => "real_data" }.to_json
     last_modified = Time.now.httpdate
     etag = Digest::MD5.hexdigest(valid_data)
+    compressed_data = StringIO.new.tap do |io|
+      gz = Zlib::GzipWriter.new(io, MyApp::COMPRESSION_LEVEL)
+      gz.write(valid_data)
+      gz.close
+    end.string
 
     MyApp.with_redis do |redis|
       redis.set(MyApp.cache_key, valid_data)
+      redis.set("#{MyApp.cache_key}_compressed", compressed_data)
       redis.set("#{MyApp.cache_key}_last_modified", last_modified)
       redis.set("#{MyApp.cache_key}_etag", etag)
     end
+
+    # Ensure cache is ready
+    assert MyApp.cache_ready?, "Cache should be ready"
 
     # First request to get the ETag
     get '/data'
@@ -53,9 +62,9 @@ class MyAppTest < Minitest::Test
   end
 
   def test_data_endpoint_when_cache_not_ready
-    MyApp.with_redis { |redis| redis.del(MyApp.cache_key) }
+    MyApp.with_redis { |redis| redis.flushdb }  # Clear all data in Redis
     get '/data'
-    assert_equal 202, last_response.status
+    assert_equal 202, last_response.status, "Expected 202, but got #{last_response.status}"
     assert_equal "Cache is updating, please try again later.", last_response.body
   end
 
@@ -114,14 +123,11 @@ class MyAppTest < Minitest::Test
     end
 
     def set(key, value, options = {})
-      if options[:nx] && @data.key?(key)
-        return false
+      if options[:ex]
+        @expiry[key] = Time.now.to_i + options[:ex]
       end
       @data[key] = value
-      if options[:px]
-        @expiry[key] = Time.now.to_f + (options[:px] / 1000.0)
-      end
-      true
+      "OK"
     end
 
     def get(key)
@@ -134,18 +140,28 @@ class MyAppTest < Minitest::Test
       @data.key?(key)
     end
 
-    def publish(channel, message)
-      # Simulate publish
+    def expire(key, seconds)
+      @expiry[key] = Time.now.to_i + seconds
+      true
+    end
+
+    def ttl(key)
+      check_expiry(key)
+      return -2 unless @data.key?(key)
+      return -1 unless @expiry.key?(key)
+      [@expiry[key] - Time.now.to_i, 0].max
     end
 
     def del(key)
       @data.delete(key)
       @expiry.delete(key)
+      1
     end
 
     def flushdb
       @data.clear
       @expiry.clear
+      "OK"
     end
 
     def simulate_time_passing(seconds)
@@ -157,25 +173,14 @@ class MyAppTest < Minitest::Test
       end
     end
 
-    def expire(key, seconds)
-      @expiry[key] = Time.now.to_f + seconds
-    end
-
-    def ttl(key)
-      return -2 unless @data.key?(key)
-      expiry_time = @expiry[key]
-      return -1 unless expiry_time
-      [(expiry_time - Time.now.to_f).ceil, 0].max
-    end
-
-    def with
-      yield self
+    def publish(channel, message)
+      1
     end
 
     private
 
     def check_expiry(key)
-      if @expiry[key] && Time.now.to_f > @expiry[key]
+      if @expiry[key] && Time.now.to_i > @expiry[key]
         @data.delete(key)
         @expiry.delete(key)
       end
