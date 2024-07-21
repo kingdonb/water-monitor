@@ -1,0 +1,31 @@
+version: v1
+type: profile
+name: github-profile
+context:
+  provider: github
+alert: "on"
+remediate: "on"
+repository:
+  - type: secret_scanning
+    def:
+      enabled: true
+  - type: dependabot_configured
+    def:
+      package_ecosystem: pypi
+      schedule_interval: weekly
+      apply_if_file: requirements.txt
+  - type: branch_protection_require_pull_request_approving_review_count
+    params:
+      branch: main
+    def:
+      required_approving_review_count: 0
+  - type: branch_protection_require_pull_request_dismiss_stale_reviews
+    params:
+      branch: main
+    def:
+      dismiss_stale_reviews: true
+  - type: branch_protection_allow_force_pushes
+    params:
+      branch: main
+    def:
+      allow_force_pushes: false
