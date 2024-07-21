@@ -14,6 +14,10 @@ class MyAppTest < Minitest::Test
     MyApp.settings.redis.flushdb
   end
 
+  def teardown
+    MyApp.settings.redis.flushdb
+  end
+
   def test_data_endpoint_when_cache_ready
     # Simulate cache being ready
     MyApp.settings.redis.set("cached_data", { test: "data" }.to_json)
@@ -32,21 +36,23 @@ class MyAppTest < Minitest::Test
   end
 
   def test_cache_update_via_listener_thread
-    # Mock the fetch_data method to avoid hitting the external service
-    MyApp.expects(:fetch_data).returns({ test: "data" })
+    MyApp.stubs(:fetch_data).returns({ "value" => "test_data" })
 
-    # Simulate cache not being ready
-    MyApp.settings.redis.del("cached_data")
-    MyApp.settings.redis.del("update_lock")
+    MyApp.start_threads
 
-    # Publish a message to the Redis channel to trigger cache update
+    puts "Publishing message to Redis channel"
     MyApp.settings.redis.publish("please_update_now", "true")
 
-    # Wait for the listener thread to process the message and update the cache
-    sleep 2
+    puts "Waiting for cache update"
+    assert wait_for_cache_update, "Cache was not updated within the expected time"
 
-    # Verify that the cache has been updated
-    assert MyApp.settings.redis.exists("cached_data")
+    cached_data = MyApp.settings.redis.get(MyApp.settings.cache_key)
+    puts "Cached data: #{cached_data.inspect}"
+
+    refute_nil cached_data, "Cached data is nil"
+
+    parsed_data = JSON.parse(cached_data)
+    assert_equal "test_data", parsed_data["value"]
   end
 
   def test_lock_timeout
@@ -57,9 +63,23 @@ class MyAppTest < Minitest::Test
     MyApp.settings.redis.set("update_lock", true)
 
     # Wait for a short period to simulate lock expiration
-    sleep 2
+    MyApp.wait_for_cache_update(2)
 
     # Verify that the lock can be acquired again
     assert MyApp.acquire_lock
+  end
+
+  def wait_for_cache_update(max_wait_time = 5)
+    start_time = Time.now
+    updated = false
+    while Time.now - start_time < max_wait_time && !updated
+      if MyApp.settings.redis.exists(MyApp.settings.cache_key)
+        updated = true
+        puts "Cache updated after #{Time.now - start_time} seconds"
+      else
+        sleep 0.1
+      end
+    end
+    updated
   end
 end

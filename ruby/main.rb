@@ -14,68 +14,118 @@ module CacheHelpers
     url
   end
 
-  def fetch_data
-    puts "Fetching data from backend"
-    uri = URI(backend_url)
-    response = Net::HTTP.get(uri)
-    data = JSON.parse(response)
-    data
+  def cache_ready?
+    cached_data = redis.get(cache_key)
+    ready = cached_data && !cached_data.empty? && !is_test_data?(cached_data)
+    puts "Cache ready: #{ready}"
+    ready
   end
 
-  def cache_ready?
-    ready = settings.redis.exists(settings.cache_key)
-    puts "Cache ready: #{ready}"
-    ready == 1
+  def is_test_data?(data)
+    parsed = JSON.parse(data)
+    parsed.is_a?(Hash) && parsed.keys == ["test"] && parsed["test"] == "data"
+  rescue JSON::ParserError
+    false
   end
 
   def acquire_lock
-    acquired = settings.redis.set(settings.lock_key, true, nx: true, px: LOCK_TIMEOUT)
-    puts "Lock acquired: #{acquired}"
+    acquired = redis.set(lock_key, true, nx: true, px: LOCK_TIMEOUT)
+    puts "Lock acquisition attempt result: #{acquired}"
     acquired
   end
 
   def release_lock
-    settings.redis.del(settings.lock_key)
+    redis.del(lock_key)
     puts "Lock released"
   end
 
   def update_cache
     puts "Updating cache"
     data = fetch_data
-    settings.redis.set(settings.cache_key, data.to_json)
+    if data.nil? || data.empty?
+      puts "Error: Fetched data is nil or empty"
+      return
+    end
+    json_data = data.to_json
+    redis.set(cache_key, json_data)
+    puts "Cache updated. New value size: #{json_data.bytesize} bytes"
     release_lock
-    puts "Cache updated"
+    puts "Cache updated and lock released"
+    cache_updated
+  end
+
+  def fetch_data
+    puts "Fetching data from backend"
+    url = backend_url
+    uri = URI(url)
+    response = Net::HTTP.get_response(uri)
+    
+    if response.is_a?(Net::HTTPSuccess)
+      data = JSON.parse(response.body)
+      puts "Data fetched successfully. Response size: #{response.body.bytesize} bytes"
+      data
+    else
+      puts "Error fetching data: #{response.code} #{response.message}"
+      nil
+    end
+  rescue => e
+    puts "Exception while fetching data: #{e.message}"
+    nil
+  end
+
+  def cache_updated
+    # Implementation depends on how you want to notify about cache updates
+    puts "Cache updated notification sent"
+  end
+
+  def redis
+    self.class.redis
+  end
+
+  def lock_key
+    self.class.lock_key
+  end
+
+  def cache_key
+    self.class.cache_key
   end
 end
 
 class MyApp < Sinatra::Base
+  extend CacheHelpers
+  include CacheHelpers
+
+  class << self
+    attr_accessor :redis, :lock_key, :cache_key
+  end
+
   configure do
     begin
-      redis = Redis.new
-      redis.ping
-      set :redis, redis
+      MyApp.redis = Redis.new
+      MyApp.redis.ping
       puts "Connected to Redis"
     rescue => e
       puts "Failed to connect to Redis: #{e.message}"
       exit 1
     end
 
-    set :lock_key, "update_lock"
-    set :cache_key, "cached_data"
+    MyApp.lock_key = "update_lock"
+    MyApp.cache_key = "cached_data"
     @@threads_started = false
+    @@cache_updated_cv = ConditionVariable.new
+    @@cache_updated_mutex = Mutex.new
   end
-
-  helpers CacheHelpers
 
   get '/data' do
     puts "Received request at /data"
     if cache_ready?
       content_type :json
-      cached_data = settings.redis.get(settings.cache_key)
+      cached_data = MyApp.redis.get(MyApp.cache_key)
+      puts "Serving cached data. Size: #{cached_data.bytesize} bytes"
       cached_data
     else
-      puts "Cache not ready, publishing please_update_now message"
-      settings.redis.publish("please_update_now", "true")
+      puts "Cache not ready or contains test data, publishing please_update_now message"
+      MyApp.redis.publish("please_update_now", "true")
       status 202
       body "Cache is updating, please try again later."
     end
@@ -84,14 +134,12 @@ class MyApp < Sinatra::Base
   def self.start_threads
     return if @@threads_started
 
-    extend CacheHelpers
-
     @cron_thread = Thread.new do
       puts "Starting cron_thread"
       loop do
         sleep 86400  # 24 hours
         puts "cron_thread woke up"
-        if !cache_ready? || (Time.now.to_i - settings.redis.ttl(settings.cache_key)) > 86400  # Check if cache is stale
+        if !cache_ready? || (Time.now.to_i - MyApp.redis.ttl(MyApp.cache_key)) > 86400  # Check if cache is stale
           puts "Cache is stale or not ready"
           if acquire_lock
             update_cache
@@ -103,16 +151,24 @@ class MyApp < Sinatra::Base
     @listener_thread = Thread.new do
       puts "Starting listener_thread"
       begin
-        settings.redis.subscribe("please_update_now") do |on|
+        MyApp.redis.subscribe("please_update_now") do |on|
           on.message do |channel, message|
             puts "Received message on please_update_now: #{message}"
-            if message == "true" && acquire_lock
-              update_cache
+            if message == "true"
+              if acquire_lock
+                puts "Lock acquired in listener thread, updating cache"
+                update_cache
+              else
+                puts "Failed to acquire lock in listener thread"
+              end
+            else
+              puts "Unexpected message: #{message}"
             end
           end
         end
       rescue => e
         puts "Failed to subscribe to Redis channel: #{e.message}"
+        puts e.backtrace.join("\n")
       end
     end
 
@@ -122,9 +178,15 @@ class MyApp < Sinatra::Base
   def self.shutdown
     @cron_thread.kill if @cron_thread
     @listener_thread.kill if @listener_thread
-    settings.redis.quit
     puts "Gracefully shutting down..."
     exit
+  end
+
+  def self.debug_info
+    puts "Threads started: #{@@threads_started}"
+    puts "Listener thread alive: #{@listener_thread&.alive?}"
+    puts "Cache exists: #{MyApp.redis.exists(MyApp.cache_key)}"
+    puts "Lock exists: #{MyApp.redis.exists(MyApp.lock_key)}"
   end
 
   at_exit { MyApp.shutdown }
