@@ -45,6 +45,7 @@ PLATFORMS
 
 DEPENDENCIES
   concurrent-ruby
+  connection_pool
   json
   minitest
   mocha

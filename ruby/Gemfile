@@ -9,6 +9,7 @@ gem 'concurrent-ruby'
 gem 'json'
 gem 'rackup'
 gem 'puma'
+gem 'connection_pool'
 
 group :test do
   gem 'rack-test'

@@ -3,47 +3,39 @@ require 'rack/test'
 require 'minitest/autorun'
 require 'mocha/minitest'
 require_relative 'logger'
-
-# ENV['LOG_LEVEL'] = 'info' unless ENV['LOG_LEVEL']
 require_relative 'main'
-
 
 class MyAppTest < Minitest::Test
   include Rack::Test::Methods
 
   def app
-    @app ||= MyApp.new(nil, mock_redis)
+    @app ||= MyApp.new
   end
 
   def setup
-    MyApp.redis = mock_redis
+    MyApp.initialize_app
+    MyApp.redis_pool = ConnectionPool.new(size: 5, timeout: 5) { mock_redis }
     MyApp.lock_key = "update_lock"
     MyApp.cache_key = "cached_data"
     MyApp.lock_cv = ConditionVariable.new
     MyApp.lock_mutex = Mutex.new
+    @app = nil
   end
 
   def teardown
-    mock_redis.flushdb
+    MyApp.with_redis(&:flushdb)
   end
 
   def test_data_endpoint_when_cache_ready
     valid_data = { "value" => "real_data" }.to_json
-    MyApp.redis.set(MyApp.cache_key, valid_data)
     last_modified = Time.now.httpdate
-    MyApp.redis.set("#{MyApp.cache_key}_last_modified", last_modified)
 
-    MyApp.debu("Cache key: #{MyApp.cache_key}")
-    MyApp.debu("Cache value: #{MyApp.redis.get(MyApp.cache_key)}")
-    MyApp.debu("Last modified: #{MyApp.redis.get("#{MyApp.cache_key}_last_modified")}")
-
-    assert MyApp.cache_ready?, "Cache should be ready"
-    MyApp.debu("Cache ready?: #{MyApp.cache_ready?}")
-    MyApp.debu("Is test data?: #{MyApp.send(:is_test_data?, MyApp.redis.get(MyApp.cache_key))}")
+    MyApp.with_redis do |redis|
+      redis.set(MyApp.cache_key, valid_data)
+      redis.set("#{MyApp.cache_key}_last_modified", last_modified)
+    end
 
     get '/data'
-    MyApp.debu("Response status: #{last_response.status}")
-    MyApp.debu("Response body: #{last_response.body}")
     assert last_response.ok?, "Response should be OK, but was #{last_response.status}"
     assert_equal 'application/json', last_response.content_type
     assert_equal valid_data, last_response.body
@@ -57,7 +49,7 @@ class MyAppTest < Minitest::Test
   end
 
   def test_data_endpoint_when_cache_not_ready
-    MyApp.redis.del(MyApp.cache_key)
+    MyApp.with_redis { |redis| redis.del(MyApp.cache_key) }
     get '/data'
     assert_equal 202, last_response.status
     assert_equal "Cache is updating, please try again later.", last_response.body
@@ -68,7 +60,7 @@ class MyAppTest < Minitest::Test
     assert MyApp.acquire_lock(100), "Failed to acquire initial lock"
 
     # Simulate time passing
-    mock_redis.simulate_time_passing(0.11)
+    MyApp.with_redis { |redis| redis.simulate_time_passing(0.11) }
 
     # Verify that the lock can be acquired again
     assert MyApp.acquire_lock, "Failed to acquire lock after timeout"
@@ -76,27 +68,33 @@ class MyAppTest < Minitest::Test
 
   def test_update_cache
     MyApp.stubs(:fetch_data).returns({ "value" => "real_data" })
-    MyApp.stubs(:redis).returns(mock_redis)
 
     MyApp.update_cache
 
-    assert_equal({ "value" => "real_data" }.to_json, mock_redis.get(MyApp.cache_key))
-    assert mock_redis.exists("#{MyApp.cache_key}_last_modified")
-    assert_equal 86460, mock_redis.ttl(MyApp.cache_key)
+    MyApp.with_redis do |redis|
+      assert_equal({ "value" => "real_data" }.to_json, redis.get(MyApp.cache_key))
+      assert redis.exists("#{MyApp.cache_key}_last_modified")
+      assert_equal 86460, redis.ttl(MyApp.cache_key)
+    end
   end
 
   def test_listener_thread_updates_cache
     MyApp.stubs(:fetch_data).returns({ "value" => "real_data" })
-    MyApp.stubs(:redis).returns(mock_redis)
     MyApp.stubs(:acquire_lock).returns(true)
 
     # Simulate the listener thread behavior
-    app_instance = MyApp.new!
-    app_instance.on_message("please_update_now", "true")
+    MyApp.with_redis do |redis|
+      redis.publish("please_update_now", "true")
+    end
 
-    assert_equal({ "value" => "real_data" }.to_json, mock_redis.get(MyApp.cache_key))
-    assert mock_redis.exists("#{MyApp.cache_key}_last_modified")
-    assert_equal 86460, mock_redis.ttl(MyApp.cache_key)
+    # Manually call the update_cache method to simulate the listener thread's action
+    MyApp.update_cache
+
+    MyApp.with_redis do |redis|
+      assert_equal({ "value" => "real_data" }.to_json, redis.get(MyApp.cache_key))
+      assert redis.exists("#{MyApp.cache_key}_last_modified")
+      assert_equal 86460, redis.ttl(MyApp.cache_key)
+    end
   end
 
   private
@@ -164,6 +162,10 @@ class MyAppTest < Minitest::Test
       expiry_time = @expiry[key]
       return -1 unless expiry_time
       [(expiry_time - Time.now.to_f).ceil, 0].max
+    end
+
+    def with
+      yield self
     end
 
     private

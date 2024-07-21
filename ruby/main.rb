@@ -5,9 +5,10 @@ require 'net/http'
 require 'json'
 require 'concurrent'
 require 'digest/md5'
+require 'connection_pool'
 
 # Set the log level for the Loggable module
-Loggable.set_log_level(ENV['LOG_LEVEL']&.to_sym || :info)
+Loggable.set_log_level(ENV['LOG_LEVEL'])
 
 module CacheHelpers
   include Loggable
@@ -22,28 +23,30 @@ module CacheHelpers
   end
 
   def cache_ready?
-    cached_data = redis.get(cache_key)
-    last_modified = redis.get("#{cache_key}_last_modified")
+    with_redis do |redis|
+      cached_data = redis.get(self.class.cache_key)
+      last_modified = redis.get("#{self.class.cache_key}_last_modified")
 
-    if cached_data.nil? || cached_data.empty?
-      debu("Cache not ready: data is nil or empty")
-      return false
+      if cached_data.nil? || cached_data.empty?
+        debu("Cache not ready: data is nil or empty")
+        return false
+      end
+
+      if last_modified.nil?
+        debu("Cache not ready: last_modified is nil")
+        return false
+      end
+
+      last_modified_time = Time.parse(last_modified)
+      if Time.now - last_modified_time > 86400  # 24 hours
+        debu("Cache not ready: data is stale")
+        return false
+      end
+
+      ready = !is_test_data?(cached_data)
+      debu("Cache ready: #{ready}")
+      ready
     end
-
-    if last_modified.nil?
-      debu("Cache not ready: last_modified is nil")
-      return false
-    end
-
-    last_modified_time = Time.parse(last_modified)
-    if Time.now - last_modified_time > 86400  # 24 hours
-      debu("Cache not ready: data is stale")
-      return false
-    end
-
-    ready = !is_test_data?(cached_data)
-    debu("Cache ready: #{ready}")
-    ready
   end
 
   def is_test_data?(data)
@@ -54,13 +57,17 @@ module CacheHelpers
   end
 
   def acquire_lock(timeout = LOCK_TIMEOUT)
-    acquired = redis.set(lock_key, true, nx: true, px: timeout)
-    debu("Lock acquisition attempt result: #{acquired}")
-    acquired
+    with_redis do |redis|
+      acquired = redis.set(self.class.lock_key, true, nx: true, px: timeout)
+      debu("Lock acquisition attempt result: #{acquired}")
+      acquired
+    end
   end
 
   def release_lock
-    redis.del(lock_key)
+    with_redis do |redis|
+      redis.del(self.class.lock_key)
+    end
     debu("Lock released")
   end
 
@@ -73,9 +80,11 @@ module CacheHelpers
       return
     end
     json_data = data.to_json
-    redis.set(cache_key, json_data)
-    redis.set("#{cache_key}_last_modified", Time.now.httpdate)
-    redis.expire(cache_key, 86460) # Set TTL to 24 hours + 1 minute
+    with_redis do |redis|
+      redis.set(self.class.cache_key, json_data)
+      redis.set("#{self.class.cache_key}_last_modified", Time.now.httpdate)
+      redis.expire(self.class.cache_key, 86460) # Set TTL to 24 hours + 1 minute
+    end
     debu("Cache updated, new value: #{json_data}")
     release_lock
     debu("Cache updated and lock released")
@@ -113,7 +122,7 @@ module CacheHelpers
   end
 
   def redis
-    self.class.redis
+    Thread.current[:redis] ||= Redis.new
   end
 
   def lock_key
@@ -131,27 +140,65 @@ class MyApp < Sinatra::Base
   include Loggable
 
   class << self
-    attr_accessor :redis, :lock_key, :cache_key, :lock_cv, :lock_mutex
     include Loggable
+    attr_accessor :redis_pool, :lock_key, :cache_key, :lock_cv, :lock_mutex
   end
 
-  def initialize(app = nil, redis_instance = nil)
-    super(app)
-    self.class.redis = redis_instance || Redis.new
-    self.class.lock_key = "update_lock"
-    self.class.cache_key = "cached_data"
-    self.class.lock_cv = ConditionVariable.new
-    self.class.lock_mutex = Mutex.new
-    @threads_started = false
+  def self.initialize_app(redis_url = nil)
+    begin
+      self.redis_pool = ConnectionPool.new(size: 5, timeout: 5) { Redis.new(url: redis_url) }
+      self.lock_key = "update_lock"
+      self.cache_key = "cached_data"
+      self.lock_cv = ConditionVariable.new
+      self.lock_mutex = Mutex.new
+      debu("Redis connection pool initialized")
+    rescue Redis::CannotConnectError => e
+      erro("Failed to connect to Redis: #{e.message}")
+      exit(1)
+    end
   end
 
-  configure do
-    set :redis, Redis.new unless settings.respond_to?(:redis)
+  # Define with_redis as both a class and instance method
+  def self.with_redis
+    redis_pool.with { |redis| yield redis }
+  end
+
+  def with_redis(&block)
+    self.class.with_redis(&block)
+  end
+
+  def self.cache_ready?
+    with_redis do |redis|
+      cached_data = redis.get(cache_key)
+      last_modified = redis.get("#{cache_key}_last_modified")
+
+      if cached_data.nil? || cached_data.empty?
+        debu("Cache not ready: data is nil or empty")
+        return false
+      end
+
+      if last_modified.nil?
+        debu("Cache not ready: last_modified is nil")
+        return false
+      end
+
+      last_modified_time = Time.parse(last_modified)
+      if Time.now - last_modified_time > 86400  # 24 hours
+        debu("Cache not ready: data is stale")
+        return false
+      end
+
+      ready = !is_test_data?(cached_data)
+      debu("Cache ready: #{ready}")
+      ready
+    end
   end
 
   def self.acquire_lock(timeout = LOCK_TIMEOUT)
     lock_mutex.synchronize do
-      acquired = redis.set(lock_key, true, nx: true, px: timeout)
+      acquired = with_redis do |redis|
+        redis.set(lock_key, true, nx: true, px: timeout)
+      end
       debu("Lock acquisition attempt result: #{acquired}")
       lock_cv.signal if acquired
       acquired
@@ -160,7 +207,9 @@ class MyApp < Sinatra::Base
 
   def self.release_lock
     lock_mutex.synchronize do
-      redis.del(lock_key)
+      with_redis do |redis|
+        redis.del(lock_key)
+      end
       debu("Lock released")
       lock_cv.signal
     end
@@ -171,8 +220,8 @@ class MyApp < Sinatra::Base
     begin
       if cache_ready?
         content_type :json
-        cached_data = MyApp.redis.get(MyApp.cache_key)
-        last_modified = MyApp.redis.get("#{MyApp.cache_key}_last_modified")
+        cached_data = with_redis { |redis| redis.get(self.class.cache_key) }
+        last_modified = with_redis { |redis| redis.get("#{self.class.cache_key}_last_modified") }
         etag = Digest::MD5.hexdigest(cached_data)
 
         # Set caching headers
@@ -189,7 +238,7 @@ class MyApp < Sinatra::Base
         end
       else
         debu("Cache not ready or contains test data, publishing please_update_now message")
-        MyApp.redis.publish("please_update_now", "true")
+        with_redis { |redis| redis.publish("please_update_now", "true") }
         status 202
         body "Cache is updating, please try again later."
       end
@@ -203,26 +252,17 @@ class MyApp < Sinatra::Base
 
   def self.start_threads
     return if @threads_started
-
     debu("Starting background threads")
 
-    @cron_thread = Thread.new do
-      debu("Starting cron_thread")
-      loop do
-        sleep 86400  # 24 hours
-        debu("cron_thread woke up")
-        if !cache_ready?
-          debu("Cache is not ready or stale")
-          if acquire_lock
-            update_cache
-          end
-        end
-      end
+    unless redis_pool
+      erro("Redis connection pool not initialized. Cannot start threads.")
+      return
     end
 
     @listener_thread = Thread.new do
       debu("Starting listener_thread")
       begin
+        redis = Redis.new # New connection for this thread
         redis.subscribe("please_update_now") do |on|
           on.message do |channel, message|
             debu("Received message on please_update_now: #{message}")
@@ -238,10 +278,31 @@ class MyApp < Sinatra::Base
             end
           end
         end
+      rescue Redis::BaseConnectionError => e
+        erro("Redis connection error in listener thread: #{e.message}")
       rescue => e
         erro("Failed to subscribe to Redis channel: #{e.message}")
         erro(e.backtrace.join("\n"))
+      ensure
+        redis.close if redis
       end
+    end
+
+    @cron_thread = Thread.new do
+      debu("Starting cron_thread")
+      redis = Redis.new # New connection for this thread
+      loop do
+        if !cache_ready?
+          debu("Cache is not ready or stale")
+          if acquire_lock
+            update_cache
+          end
+        end
+        sleep 86400 # 24 hours
+        debu("cron_thread woke up")
+      end
+    ensure
+      redis.close if redis
     end
 
     @threads_started = true
@@ -256,13 +317,6 @@ class MyApp < Sinatra::Base
     exit
   end
 
-  def self.debug_info
-    debu("Threads started: #{@threads_started}")
-    debu("Listener thread alive: #{@listener_thread&.alive?}")
-    debu("Cache exists: #{redis.exists(cache_key)}")
-    debu("Lock exists: #{redis.exists(lock_key)}")
-  end
-
   def self.update_cache
     debu("Updating cache")
     data = fetch_data
@@ -272,9 +326,11 @@ class MyApp < Sinatra::Base
       return
     end
     json_data = data.to_json
-    redis.set(cache_key, json_data)
-    redis.set("#{cache_key}_last_modified", Time.now.httpdate)
-    redis.expire(cache_key, 86460) # Set TTL to 24 hours + 1 minute
+    with_redis do |redis|
+      redis.set(cache_key, json_data)
+      redis.set("#{cache_key}_last_modified", Time.now.httpdate)
+      redis.expire(cache_key, 86460) # Set TTL to 24 hours + 1 minute
+    end
     debu("Cache updated, new value: #{json_data}")
     release_lock
     debu("Cache updated and lock released")
@@ -319,9 +375,11 @@ class MyApp < Sinatra::Base
 end
 
 # Set the log level for MyApp
-MyApp.set_log_level(ENV['LOG_LEVEL']&.to_sym || :info)
+MyApp.set_log_level(ENV['LOG_LEVEL'])
 
 # Start the application and threads after setting the log level
+MyApp.initialize_app(ENV['REDIS_URL'])
+
 server_thread = Thread.new do
   MyApp.run! if MyApp.app_file == $0
 end

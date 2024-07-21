@@ -8,7 +8,11 @@ module Loggable
 
   module ClassMethods
     def set_log_level(level)
-      @log_level = LOG_LEVELS[level] || LOG_LEVELS[:info]
+      level = level&.[](...4)&.to_sym || level || :info
+      unless LOG_LEVELS.key?(level)
+        raise ArgumentError, "Invalid log level: #{level}"
+      end
+      @log_level = LOG_LEVELS[level]
     end
 
     def log_level
