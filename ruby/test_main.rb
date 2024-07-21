@@ -33,17 +33,17 @@ class MyAppTest < Minitest::Test
     last_modified = Time.now.httpdate
     MyApp.redis.set("#{MyApp.cache_key}_last_modified", last_modified)
 
-    MyApp.debug("Cache key: #{MyApp.cache_key}")
-    MyApp.debug("Cache value: #{MyApp.redis.get(MyApp.cache_key)}")
-    MyApp.debug("Last modified: #{MyApp.redis.get("#{MyApp.cache_key}_last_modified")}")
+    MyApp.debu("Cache key: #{MyApp.cache_key}")
+    MyApp.debu("Cache value: #{MyApp.redis.get(MyApp.cache_key)}")
+    MyApp.debu("Last modified: #{MyApp.redis.get("#{MyApp.cache_key}_last_modified")}")
 
     assert MyApp.cache_ready?, "Cache should be ready"
-    MyApp.debug("Cache ready?: #{MyApp.cache_ready?}")
-    MyApp.debug("Is test data?: #{MyApp.send(:is_test_data?, MyApp.redis.get(MyApp.cache_key))}")
+    MyApp.debu("Cache ready?: #{MyApp.cache_ready?}")
+    MyApp.debu("Is test data?: #{MyApp.send(:is_test_data?, MyApp.redis.get(MyApp.cache_key))}")
 
     get '/data'
-    MyApp.debug("Response status: #{last_response.status}")
-    MyApp.debug("Response body: #{last_response.body}")
+    MyApp.debu("Response status: #{last_response.status}")
+    MyApp.debu("Response body: #{last_response.body}")
     assert last_response.ok?, "Response should be OK, but was #{last_response.status}"
     assert_equal 'application/json', last_response.content_type
     assert_equal valid_data, last_response.body

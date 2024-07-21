@@ -17,14 +17,32 @@ module CacheHelpers
   def backend_url
     end_date = Time.now.strftime("%F")
     url = "https://waterservices.usgs.gov/nwis/dv/?format=json&sites=04096405,04096515,04097500,040975299,04097540,04099000,04100500,04101000,04101500,04101800,04102500,04099750&statCd=00003&siteStatus=all&startDT=2000-01-01&endDT=#{end_date}"
-    debug("backend_url: #{url}")
+    debu("backend_url: #{url}")
     url
   end
 
   def cache_ready?
     cached_data = redis.get(cache_key)
-    ready = cached_data && !cached_data.empty? && !is_test_data?(cached_data)
-    debug("Cache ready: #{ready}")
+    last_modified = redis.get("#{cache_key}_last_modified")
+
+    if cached_data.nil? || cached_data.empty?
+      debu("Cache not ready: data is nil or empty")
+      return false
+    end
+
+    if last_modified.nil?
+      debu("Cache not ready: last_modified is nil")
+      return false
+    end
+
+    last_modified_time = Time.parse(last_modified)
+    if Time.now - last_modified_time > 86400  # 24 hours
+      debu("Cache not ready: data is stale")
+      return false
+    end
+
+    ready = !is_test_data?(cached_data)
+    debu("Cache ready: #{ready}")
     ready
   end
 
@@ -37,19 +55,19 @@ module CacheHelpers
 
   def acquire_lock(timeout = LOCK_TIMEOUT)
     acquired = redis.set(lock_key, true, nx: true, px: timeout)
-    debug("Lock acquisition attempt result: #{acquired}")
+    debu("Lock acquisition attempt result: #{acquired}")
     acquired
   end
 
   def release_lock
     redis.del(lock_key)
-    debug("Lock released")
+    debu("Lock released")
   end
 
   def update_cache
-    debug("Updating cache")
+    debu("Updating cache")
     data = fetch_data
-    debug("Data fetched: #{data.inspect}")
+    debu("Data fetched: #{data.inspect}")
     if data.nil? || data.empty?
       erro("Error: Fetched data is nil or empty")
       return
@@ -58,26 +76,26 @@ module CacheHelpers
     redis.set(cache_key, json_data)
     redis.set("#{cache_key}_last_modified", Time.now.httpdate)
     redis.expire(cache_key, 86460) # Set TTL to 24 hours + 1 minute
-    debug("Cache updated, new value: #{json_data}")
+    debu("Cache updated, new value: #{json_data}")
     release_lock
-    debug("Cache updated and lock released")
+    debu("Cache updated and lock released")
     cache_updated
   end
 
   def fetch_data
-    debug("Fetching data from backend")
+    debu("Fetching data from backend")
     url = backend_url
     uri = URI(url)
     response = Net::HTTP.get_response(uri)
-    
+
     if response.is_a?(Net::HTTPSuccess)
       data = JSON.parse(response.body)
       response_size = response.body.bytesize
-      debug("Data fetched successfully. Response size: #{response_size} bytes")
+      debu("Data fetched successfully. Response size: #{response_size} bytes")
       if response_size <= 400
-        debug("Response body: #{response.body}")
+        debu("Response body: #{response.body}")
       else
-        debug("Response body too large to print (> 400 bytes)")
+        debu("Response body too large to print (> 400 bytes)")
       end
       data
     else
@@ -91,7 +109,7 @@ module CacheHelpers
 
   def cache_updated
     # Implementation depends on how you want to notify about cache updates
-    debug("Cache updated notification sent")
+    debu("Cache updated notification sent")
   end
 
   def redis
@@ -114,6 +132,7 @@ class MyApp < Sinatra::Base
 
   class << self
     attr_accessor :redis, :lock_key, :cache_key, :lock_cv, :lock_mutex
+    include Loggable
   end
 
   def initialize(app = nil, redis_instance = nil)
@@ -133,7 +152,7 @@ class MyApp < Sinatra::Base
   def self.acquire_lock(timeout = LOCK_TIMEOUT)
     lock_mutex.synchronize do
       acquired = redis.set(lock_key, true, nx: true, px: timeout)
-      debug("Lock acquisition attempt result: #{acquired}")
+      debu("Lock acquisition attempt result: #{acquired}")
       lock_cv.signal if acquired
       acquired
     end
@@ -142,13 +161,13 @@ class MyApp < Sinatra::Base
   def self.release_lock
     lock_mutex.synchronize do
       redis.del(lock_key)
-      debug("Lock released")
+      debu("Lock released")
       lock_cv.signal
     end
   end
 
   get '/data' do
-    debug("Received request at /data")
+    debu("Received request at /data")
     begin
       if cache_ready?
         content_type :json
@@ -162,14 +181,14 @@ class MyApp < Sinatra::Base
 
         # Check if the client's cached version is still valid
         if stale?(etag: etag, last_modified: last_modified)
-          debug("Serving cached data. Size: #{cached_data.bytesize} bytes")
+          debu("Serving cached data. Size: #{cached_data.bytesize} bytes")
           status 200
           body cached_data
         else
           status 304
         end
       else
-        debug("Cache not ready or contains test data, publishing please_update_now message")
+        debu("Cache not ready or contains test data, publishing please_update_now message")
         MyApp.redis.publish("please_update_now", "true")
         status 202
         body "Cache is updating, please try again later."
@@ -185,13 +204,15 @@ class MyApp < Sinatra::Base
   def self.start_threads
     return if @threads_started
 
+    debu("Starting background threads")
+
     @cron_thread = Thread.new do
-      debug("Starting cron_thread")
+      debu("Starting cron_thread")
       loop do
         sleep 86400  # 24 hours
-        debug("cron_thread woke up")
-        if !cache_ready? || (Time.now.to_i - redis.ttl(cache_key)) > 86400  # Check if cache is stale
-          debug("Cache is stale or not ready")
+        debu("cron_thread woke up")
+        if !cache_ready?
+          debu("Cache is not ready or stale")
           if acquire_lock
             update_cache
           end
@@ -200,20 +221,20 @@ class MyApp < Sinatra::Base
     end
 
     @listener_thread = Thread.new do
-      debug("Starting listener_thread")
+      debu("Starting listener_thread")
       begin
         redis.subscribe("please_update_now") do |on|
           on.message do |channel, message|
-            debug("Received message on please_update_now: #{message}")
+            debu("Received message on please_update_now: #{message}")
             if message == "true"
               if acquire_lock
-                debug("Lock acquired in listener thread, updating cache")
+                debu("Lock acquired in listener thread, updating cache")
                 update_cache
               else
-                debug("Failed to acquire lock in listener thread")
+                debu("Failed to acquire lock in listener thread")
               end
             else
-              debug("Unexpected message: #{message}")
+              debu("Unexpected message: #{message}")
             end
           end
         end
@@ -224,9 +245,11 @@ class MyApp < Sinatra::Base
     end
 
     @threads_started = true
+    debu("Background threads started")
   end
 
   def self.shutdown
+    debu("Shutting down background threads")
     @cron_thread.kill if @cron_thread
     @listener_thread.kill if @listener_thread
     info("Gracefully shutting down...")
@@ -234,16 +257,16 @@ class MyApp < Sinatra::Base
   end
 
   def self.debug_info
-    debug("Threads started: #{@threads_started}")
-    debug("Listener thread alive: #{@listener_thread&.alive?}")
-    debug("Cache exists: #{redis.exists(cache_key)}")
-    debug("Lock exists: #{redis.exists(lock_key)}")
+    debu("Threads started: #{@threads_started}")
+    debu("Listener thread alive: #{@listener_thread&.alive?}")
+    debu("Cache exists: #{redis.exists(cache_key)}")
+    debu("Lock exists: #{redis.exists(lock_key)}")
   end
 
   def self.update_cache
-    debug("Updating cache")
+    debu("Updating cache")
     data = fetch_data
-    debug("Data fetched: #{data.inspect}")
+    debu("Data fetched: #{data.inspect}")
     if data.nil? || data.empty?
       erro("Error: Fetched data is nil or empty")
       return
@@ -252,23 +275,23 @@ class MyApp < Sinatra::Base
     redis.set(cache_key, json_data)
     redis.set("#{cache_key}_last_modified", Time.now.httpdate)
     redis.expire(cache_key, 86460) # Set TTL to 24 hours + 1 minute
-    debug("Cache updated, new value: #{json_data}")
+    debu("Cache updated, new value: #{json_data}")
     release_lock
-    debug("Cache updated and lock released")
+    debu("Cache updated and lock released")
     cache_updated
   end
 
   def on_message(channel, message)
-    debug("Received message on #{channel}: #{message}")
+    debu("Received message on #{channel}: #{message}")
     if channel == "please_update_now" && message == "true"
       if self.class.acquire_lock
-        debug("Lock acquired in listener thread, updating cache")
+        debu("Lock acquired in listener thread, updating cache")
         self.class.update_cache
       else
-        debug("Failed to acquire lock in listener thread")
+        debu("Failed to acquire lock in listener thread")
       end
     else
-      debug("Unexpected message: #{message}")
+      debu("Unexpected message: #{message}")
     end
   end
 
