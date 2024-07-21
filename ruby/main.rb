@@ -93,6 +93,7 @@ module CacheHelpers
   def cache_updated
     # Implementation depends on how you want to notify about cache updates
     debug("Cache updated notification sent")
+    redis.publish("cache_updated", "true")
   end
 
   def redis
@@ -106,6 +107,20 @@ module CacheHelpers
   def cache_key
     self.class.cache_key
   end
+
+  def on_message(channel, message)
+    debug("Received message on #{channel}: #{message}")
+    if channel == "please_update_now" && message == "true"
+      if MyApp.acquire_lock
+        debug("Lock acquired in listener thread, updating cache")
+        MyApp.update_cache
+      else
+        debug("Failed to acquire lock in listener thread")
+      end
+    else
+      debug("Unexpected message: #{message}")
+    end
+  end
 end
 
 class MyApp < Sinatra::Base
@@ -114,7 +129,7 @@ class MyApp < Sinatra::Base
   include Loggable
 
   class << self
-    attr_accessor :redis, :lock_key, :cache_key, :lock_cv, :lock_mutex
+    attr_accessor :redis, :lock_key, :cache_key, :lock_cv, :lock_mutex, :threads_started
   end
 
   def initialize(app = nil, redis_instance = nil)
@@ -124,7 +139,7 @@ class MyApp < Sinatra::Base
     self.class.cache_key = "cached_data"
     self.class.lock_cv = ConditionVariable.new
     self.class.lock_mutex = Mutex.new
-    @threads_started = false
+    self.class.threads_started = false
   end
 
   configure do
@@ -148,13 +163,14 @@ class MyApp < Sinatra::Base
     end
   end
 
+  def self.cache_ready?
+    redis.exists(cache_key)
+  end
+
   get '/data' do
-    debug("Received request at /data")
     if cache_ready?
       content_type :json
-      cached_data = MyApp.redis.get(MyApp.cache_key)
-      debug("Serving cached data. Size: #{cached_data.bytesize} bytes")
-      cached_data
+      redis.get(cache_key)
     else
       debug("Cache not ready or contains test data, publishing please_update_now message")
       MyApp.redis.publish("please_update_now", "true")
@@ -164,7 +180,7 @@ class MyApp < Sinatra::Base
   end
 
   def self.start_threads
-    return if @threads_started
+    return if threads_started
 
     @cron_thread = Thread.new do
       debug("Starting cron_thread")
@@ -204,18 +220,17 @@ class MyApp < Sinatra::Base
       end
     end
 
-    @threads_started = true
+    self.threads_started = true
   end
 
   def self.shutdown
-    @cron_thread.kill if @cron_thread
-    @listener_thread.kill if @listener_thread
-    info("Gracefully shutting down...")
+    @cron_thread&.kill
+    @listener_thread&.kill
     exit
   end
 
   def self.debug_info
-    debug("Threads started: #{@threads_started}")
+    debug("Threads started: #{threads_started}")
     debug("Listener thread alive: #{@listener_thread&.alive?}")
     debug("Cache exists: #{redis.exists(cache_key)}")
     debug("Lock exists: #{redis.exists(lock_key)}")
