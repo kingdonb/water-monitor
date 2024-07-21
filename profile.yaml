@@ -18,7 +18,7 @@ repository:
     params:
       branch: main
     def:
-      required_approving_review_count: 1
+      required_approving_review_count: 0
   - type: branch_protection_require_pull_request_dismiss_stale_reviews
     params:
       branch: main
