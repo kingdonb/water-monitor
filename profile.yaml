@@ -7,8 +7,6 @@ alert: "on"
 remediate: "on"
 repository:
   - type: secret_scanning
-    name: "secret_scanning_github" # Optional, as there aren't multiple rules
-                                   # of the same type under the entity - repository
     def:
       enabled: true
   - type: dependabot_configured
