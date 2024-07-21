@@ -1,0 +1,11 @@
+source 'https://rubygems.org'
+
+ruby '3.3.4'
+
+gem 'sinatra'
+gem 'mocha', require: false
+gem 'redis'
+gem 'concurrent-ruby'
+gem 'json'
+gem 'rackup'
+gem 'puma'
