@@ -1,9 +1,25 @@
 # Hello RubyConf Chicago 2024!
-
 WIP - this is a polyglot codebase (with one main language currently, Ruby)
 
-We will add the other languages later. For now the focus is automating and
-proving the problem can be solved in pure Ruby (with some native extensions).
+## Project Overview
+
+This project aims to create a service that acts as an intermediary between end-users and a slower back-end service. The back-end service aggregates data from various sources and produces JSON on-demand, which typically takes several seconds to load. Since this data doesn't change frequently, our service will:
+
+1. Pull the data once a day
+2. Push updates to clients only as often as they request them or once a day, whichever is less frequent
+
+This approach significantly reduces load times for end-users while maintaining reasonably up-to-date information.
+
+### Development Phases
+
+1. **Ruby Proof-of-Concept**: Initially, we're implementing this as a single-class proof-of-concept in pure Ruby with native extensions (gems, some parts written in C).
+
+2. **Modular WebAssembly Implementation**: We'll then break down the system into smaller, simpler parts. These will be implemented as WebAssembly modules, offering benefits such as:
+   - Easier presentation and verification of correctness
+   - Sandboxing for improved security
+   - Type-checking (where supported by the implementation language)
+
+The goal is to present this project and its evolution at RubyConf Chicago 2024, demonstrating the transition from a monolithic Ruby application to a modular, polyglot WebAssembly-based system.
 
 ## Navigate Codebase
 
