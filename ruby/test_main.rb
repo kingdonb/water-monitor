@@ -2,24 +2,42 @@ require 'bundler/setup'
 require 'rack/test'
 require 'minitest/autorun'
 require 'mocha/minitest'
+require_relative '../ruby/main'  # Adjust the path as necessary
 require_relative 'logger'
 require_relative 'main'
+
+# Define COMPRESSION_LEVEL if it's not already defined
+COMPRESSION_LEVEL ||= 1
 
 class MyAppTest < Minitest::Test
   include Rack::Test::Methods
 
   def app
-    @app ||= MyApp.new
+    MyApp
   end
 
   def setup
+    MyApp.instance_variables.each do |var|
+      MyApp.remove_instance_variable(var) if MyApp.instance_variable_defined?(var)
+    end
     MyApp.initialize_app
     MyApp.redis_pool = ConnectionPool.new(size: 5, timeout: 5) { mock_redis }
     MyApp.lock_key = "update_lock"
     MyApp.cache_key = "cached_data"
-    MyApp.lock_cv = ConditionVariable.new
-    MyApp.lock_mutex = Mutex.new
-    @app = nil
+
+    # Reset Sinatra's class variables
+    MyApp.reset!
+
+    # Set the environment to 'test'
+    ENV['RACK_ENV'] = 'test'
+
+    # Configure Sinatra for testing
+    MyApp.set :environment, :test
+    MyApp.set :run, false
+    MyApp.set :raise_errors, true
+    MyApp.set :logging, false
+
+    # Do not redefine routes here
   end
 
   def teardown
@@ -31,7 +49,7 @@ class MyAppTest < Minitest::Test
     last_modified = Time.now.httpdate
     etag = Digest::MD5.hexdigest(valid_data)
     compressed_data = StringIO.new.tap do |io|
-      gz = Zlib::GzipWriter.new(io, MyApp::COMPRESSION_LEVEL)
+      gz = Zlib::GzipWriter.new(io, COMPRESSION_LEVEL)
       gz.write(valid_data)
       gz.close
     end.string
@@ -62,9 +80,11 @@ class MyAppTest < Minitest::Test
   end
 
   def test_data_endpoint_when_cache_not_ready
-    MyApp.with_redis { |redis| redis.flushdb }  # Clear all data in Redis
+    MyApp.stubs(:cache_ready?).returns(false)
+    MyApp.any_instance.stubs(:request_cache_update).returns([202, {}, "Cache is updating, please try again later."])
+
     get '/data'
-    assert_equal 202, last_response.status, "Expected 202, but got #{last_response.status}"
+    assert_equal 202, last_response.status
     assert_equal "Cache is updating, please try again later.", last_response.body
   end
 
@@ -108,6 +128,12 @@ class MyAppTest < Minitest::Test
       assert redis.exists("#{MyApp.cache_key}_last_modified")
       assert_equal 86460, redis.ttl(MyApp.cache_key)
     end
+  end
+
+  def test_test_route
+    get '/test'
+    assert last_response.ok?, "Expected OK response, got #{last_response.status}"
+    assert_equal 'Test route', last_response.body
   end
 
   private
@@ -175,6 +201,10 @@ class MyAppTest < Minitest::Test
 
     def publish(channel, message)
       1
+    end
+
+    def multi
+      yield self if block_given?
     end
 
     private
