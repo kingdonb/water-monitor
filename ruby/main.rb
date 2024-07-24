@@ -279,25 +279,27 @@ class MyApp < Sinatra::Base
     etag = self.class.in_memory_etag
     last_modified = self.class.in_memory_last_modified
 
-    set_caching_headers(etag, last_modified)
+    headers['ETag'] = etag
+    headers['Last-Modified'] = last_modified
+    headers['Cache-Control'] = 'public, max-age=86400, must-revalidate'
+    headers['Vary'] = 'Accept-Encoding'
 
     if client_cache_valid?(etag)
       status 304
       return
     end
 
-    serve_compressed_or_uncompressed_data
+    accept_encoding = request.env['HTTP_ACCEPT_ENCODING'] || ''
+    if accept_encoding.include?('gzip')
+      headers['Content-Encoding'] = 'gzip'
+      body self.class.in_memory_compressed_data
+    else
+      body Zlib::Inflate.inflate(self.class.in_memory_compressed_data)
+    end
   rescue => e
     erro("Error serving cached data: #{e.message}")
-    status 200
-    body "{}"
-  end
-
-  def set_caching_headers(etag, last_modified)
-    headers['Last-Modified'] = last_modified
-    headers['ETag'] = etag
-    headers['Cache-Control'] = 'public, max-age=86400, must-revalidate'
-    headers['Vary'] = 'Accept-Encoding'
+    status 500
+    body "An error occurred while processing your request."
   end
 
   def client_cache_valid?(etag)
@@ -309,21 +311,6 @@ class MyApp < Sinatra::Base
       debu("Cache miss: Client cache is stale or non-existent")
       false
     end
-  end
-
-  def serve_compressed_or_uncompressed_data
-    accept_encoding = request.env['HTTP_ACCEPT_ENCODING'] || request.env['Accept-Encoding']
-    if accept_encoding&.include?('gzip')
-      headers['Content-Encoding'] = 'gzip'
-      response_body = self.class.in_memory_compressed_data
-      debu("Serving compressed data (gzip). Size: #{response_body.bytesize} bytes")
-    else
-      response_body = Zlib::GzipReader.new(StringIO.new(self.class.in_memory_compressed_data)).read
-      debu("Serving uncompressed data. Size: #{response_body.bytesize} bytes")
-    end
-
-    status 200
-    body response_body
   end
 
   def request_cache_update
