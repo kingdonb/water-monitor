@@ -243,6 +243,8 @@ class MyApp < Sinatra::Base
 
   COMPRESSION_LEVEL = Zlib::BEST_COMPRESSION
 
+  set :bind, '0.0.0.0'
+
   get '/data' do
     debu("Received request at /data")
     debu("If-None-Match: #{request.env['HTTP_IF_NONE_MATCH']}")
