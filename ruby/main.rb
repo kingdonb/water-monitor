@@ -8,90 +8,123 @@ require 'digest/md5'
 require 'connection_pool'
 require 'zlib'
 
-# Set the log level for the Loggable module
-Loggable.set_log_level(ENV['LOG_LEVEL'])
+COMPRESSION_LEVEL = 1  # You can adjust this value as needed
 
 module CacheHelpers
   include Loggable
 
   LOCK_TIMEOUT = 15_000 # 15 seconds in milliseconds
 
-  def backend_url
-    end_date = Time.now.strftime("%F")
-    url = "https://waterservices.usgs.gov/nwis/dv/?format=json&sites=04096405,04096515,04097500,040975299,04097540,04099000,04100500,04101000,04101500,04101800,04102500,04099750&statCd=00003&siteStatus=all&startDT=2000-01-01&endDT=#{end_date}"
-    debu("backend_url: #{url}")
-    url
+  def self.included(base)
+    base.extend(ClassMethods)
   end
 
-  def cache_ready?
-    with_redis do |redis|
-      cached_data = redis.get(cache_key)
-      compressed_data = redis.get("#{cache_key}_compressed")
-      last_modified = redis.get("#{cache_key}_last_modified")
-      etag = redis.get("#{cache_key}_etag")
+  module ClassMethods
+    def backend_url
+      end_date = Time.now.strftime("%F")
+      url = "https://waterservices.usgs.gov/nwis/dv/?format=json&sites=04096405,04096515,04097500,040975299,04097540,04099000,04100500,04101000,04101500,04101800,04102500,04099750&statCd=00003&siteStatus=all&startDT=2000-01-01&endDT=#{end_date}"
+      debu("backend_url: #{url}")
+      url
+    end
 
-      if cached_data.nil? || cached_data.empty? ||
-         compressed_data.nil? || compressed_data.empty? ||
-         last_modified.nil? || last_modified.empty? ||
-         etag.nil? || etag.empty?
-        debu("Cache not ready: one or more required fields are missing or empty")
-        return false
+    def fetch_data
+      debu("Fetching data from backend")
+      url = backend_url
+      uri = URI(url)
+      response = Net::HTTP.get_response(uri)
+
+      if response.is_a?(Net::HTTPSuccess)
+        data = JSON.parse(response.body)
+        response_size = response.body.bytesize
+        debu("Data fetched successfully. Response size: #{response_size} bytes")
+        if response_size <= 400
+          debu("Response body: #{response.body}")
+        else
+          debu("Response body too large to print (> 400 bytes)")
+        end
+        data
+      else
+        erro("Error fetching data: #{response.code} #{response.message}")
+        nil
+      end
+    rescue => e
+      erro("Exception while fetching data: #{e.message}")
+      nil
+    end
+
+    def cache_ready?
+      current_time = Time.now
+      if @last_redis_check.nil? || current_time - @last_redis_check > 5 || ENV['RACK_ENV'] == 'test'
+        with_redis do |redis|
+          last_modified = redis.get("#{cache_key}_last_modified")
+          @in_memory_last_modified = last_modified
+          @in_memory_etag = redis.get("#{cache_key}_etag")
+          @in_memory_compressed_data = redis.get("#{cache_key}_compressed")
+        end
+        @last_redis_check = current_time
       end
 
-      last_modified_time = Time.parse(last_modified)
-      if Time.now - last_modified_time > 86400  # 24 hours
+      return false if @in_memory_compressed_data.nil? || @in_memory_compressed_data.empty? ||
+                    @in_memory_last_modified.nil? || @in_memory_last_modified.empty? ||
+                    @in_memory_etag.nil? || @in_memory_etag.empty?
+
+      last_modified_time = Time.parse(@in_memory_last_modified)
+      if current_time - last_modified_time > 86400 # 24 hours
         debu("Cache not ready: data is stale")
         return false
       end
 
-      ready = !is_test_data?(cached_data)
-      debu("Cache ready: #{ready}")
-      ready
+      true
+    rescue => e
+      erro("Error checking cache readiness: #{e.message}")
+      false
     end
-  rescue => e
-    erro("Error checking cache readiness: #{e.message}")
-    false
-  end
 
-  def is_test_data?(data)
-    parsed = JSON.parse(data)
-    parsed.is_a?(Hash) && parsed.keys == ["test"] && parsed["test"] == "data"
-  rescue JSON::ParserError
-    false
-  end
-
-  def acquire_lock(timeout = LOCK_TIMEOUT)
-    with_redis do |redis|
-      acquired = redis.set(lock_key, true, nx: true, px: timeout)
-      debu("Lock acquisition attempt result: #{acquired}")
-      acquired
+    def acquire_lock(timeout = LOCK_TIMEOUT)
+      with_redis do |redis|
+        acquired = redis.set(lock_key, true, nx: true, px: timeout)
+        debu("Lock acquisition attempt result: #{acquired}")
+        acquired
+      end
     end
-  end
 
-  def release_lock
-    with_redis do |redis|
-      redis.del(lock_key)
-    end
-    debu("Lock released")
-  end
+    def update_cache
+      debu("Updating cache")
+      data = fetch_data
+      debu("Data fetched: #{data.inspect}")
+      if data.nil? || data.empty?
+        erro("Error: Fetched data is nil or empty")
+        return
+      end
+      json_data = data.to_json
+      compressed_data = StringIO.new.tap do |io|
+        gz = Zlib::GzipWriter.new(io, COMPRESSION_LEVEL)
+        gz.write(json_data)
+        gz.close
+      end.string
+      etag = Digest::MD5.hexdigest(json_data)
+      current_time = Time.now.httpdate
 
-  def update_cache
-    debu("Updating cache")
-    data = fetch_data
-    debu("Data fetched: #{data.inspect}")
-    if data.nil? || data.empty?
-      erro("Error: Fetched data is nil or empty")
-      return
+      with_redis do |redis|
+        if redis.respond_to?(:multi)
+          redis.multi do |multi|
+            set_cache_data(multi, json_data, compressed_data, etag, current_time)
+          end
+        else
+          set_cache_data(redis, json_data, compressed_data, etag, current_time)
+        end
+      end
+
+      @in_memory_compressed_data = compressed_data
+      @in_memory_etag = etag
+      @in_memory_last_modified = current_time
+
+      debu("Cache updated, new value size: #{json_data.bytesize} bytes, compressed size: #{compressed_data.bytesize} bytes")
+      release_lock
+      debu("Cache updated and lock released")
     end
-    json_data = data.to_json
-    compressed_data = StringIO.new.tap do |io|
-      gz = Zlib::GzipWriter.new(io, COMPRESSION_LEVEL)
-      gz.write(json_data)
-      gz.close
-    end.string
-    etag = Digest::MD5.hexdigest(json_data)
-    current_time = Time.now.httpdate
-    with_redis do |redis|
+
+    def set_cache_data(redis, json_data, compressed_data, etag, current_time)
       redis.set(cache_key, json_data)
       redis.set("#{cache_key}_compressed", compressed_data)
       redis.set("#{cache_key}_last_modified", current_time)
@@ -101,40 +134,12 @@ module CacheHelpers
       redis.expire("#{cache_key}_last_modified", 86460)
       redis.expire("#{cache_key}_etag", 86460)
     end
-    debu("Cache updated, new value size: #{json_data.bytesize} bytes, compressed size: #{compressed_data.bytesize} bytes")
-    release_lock
-    debu("Cache updated and lock released")
-    cache_updated
-  end
 
-  def fetch_data
-    debu("Fetching data from backend")
-    url = backend_url
-    uri = URI(url)
-    response = Net::HTTP.get_response(uri)
-
-    if response.is_a?(Net::HTTPSuccess)
-      data = JSON.parse(response.body)
-      response_size = response.body.bytesize
-      debu("Data fetched successfully. Response size: #{response_size} bytes")
-      if response_size <= 400
-        debu("Response body: #{response.body}")
-      else
-        debu("Response body too large to print (> 400 bytes)")
+    def release_lock
+      with_redis do |redis|
+        redis.del(lock_key)
       end
-      data
-    else
-      erro("Error fetching data: #{response.code} #{response.message}")
-      nil
     end
-  rescue => e
-    erro("Exception while fetching data: #{e.message}")
-    nil
-  end
-
-  def cache_updated
-    # Implementation depends on how you want to notify about cache updates
-    debu("Cache updated notification sent")
   end
 
   def redis
@@ -151,16 +156,85 @@ module CacheHelpers
 end
 
 class MyApp < Sinatra::Base
-  extend CacheHelpers
   include CacheHelpers
   include Loggable
+  extend CacheHelpers::ClassMethods
+
+  configure do
+    set :environment, ENV['RACK_ENV'] || 'development'
+  end
+
+  get '/data' do
+    data
+  end
+
+  get '/test' do
+    'Test route'
+  end
+
+  def data
+    debu("Received request at /data")
+    log_request_headers
+    begin
+      if self.class.cache_ready?
+        serve_cached_data
+      else
+        request_cache_update
+      end
+    rescue => e
+      erro("Error in /data route: #{e.message}")
+      erro(e.backtrace.join("\n"))
+      status 500
+      body "An error occurred while processing your request."
+    end
+  end
 
   class << self
     include Loggable
     attr_accessor :redis_pool, :lock_key, :cache_key, :lock_cv, :lock_mutex
+    attr_accessor :in_memory_etag, :in_memory_compressed_data, :in_memory_last_modified
+    attr_accessor :last_redis_check
+    attr_accessor :app_initialized
+
+    def update_cache
+      debu("Updating cache")
+      data = fetch_data
+      debu("Data fetched: #{data.inspect}")
+      if data.nil? || data.empty?
+        erro("Error: Fetched data is nil or empty")
+        return
+      end
+      json_data = data.to_json
+      compressed_data = StringIO.new.tap do |io|
+        gz = Zlib::GzipWriter.new(io, COMPRESSION_LEVEL)
+        gz.write(json_data)
+        gz.close
+      end.string
+      etag = Digest::MD5.hexdigest(json_data)
+      current_time = Time.now.httpdate
+
+      with_redis do |redis|
+        if redis.respond_to?(:multi)
+          redis.multi do |multi|
+            set_cache_data(multi, json_data, compressed_data, etag, current_time)
+          end
+        else
+          set_cache_data(redis, json_data, compressed_data, etag, current_time)
+        end
+      end
+
+      @in_memory_compressed_data = compressed_data
+      @in_memory_etag = etag
+      @in_memory_last_modified = current_time
+
+      debu("Cache updated, new value size: #{json_data.bytesize} bytes, compressed size: #{compressed_data.bytesize} bytes")
+      release_lock
+      debu("Cache updated and lock released")
+    end
   end
 
   def self.initialize_app(redis_url = nil)
+    return if @app_initialized
     begin
       self.redis_pool = ConnectionPool.new(size: 5, timeout: 5) { Redis.new(url: redis_url) }
       self.lock_key = "update_lock"
@@ -168,6 +242,7 @@ class MyApp < Sinatra::Base
       self.lock_cv = ConditionVariable.new
       self.lock_mutex = Mutex.new
       debu("Redis connection pool initialized")
+      @app_initialized = true
     rescue Redis::CannotConnectError => e
       erro("Failed to connect to Redis: #{e.message}")
       exit(1)
@@ -183,66 +258,6 @@ class MyApp < Sinatra::Base
     self.class.with_redis(&block)
   end
 
-  def self.cache_ready?
-    with_redis do |redis|
-      cached_data = redis.get(cache_key)
-      compressed_data = redis.get("#{cache_key}_compressed")
-      last_modified = redis.get("#{cache_key}_last_modified")
-      etag = redis.get("#{cache_key}_etag")
-
-      if cached_data.nil? || cached_data.empty? ||
-         compressed_data.nil? || compressed_data.empty? ||
-         last_modified.nil? || last_modified.empty? ||
-         etag.nil? || etag.empty?
-        debu("Cache not ready: one or more required fields are missing or empty")
-        return false
-      end
-
-      last_modified_time = Time.parse(last_modified)
-      if Time.now - last_modified_time > 86400  # 24 hours
-        debu("Cache not ready: data is stale")
-        return false
-      end
-
-      ready = !is_test_data?(cached_data)
-      debu("Cache ready: #{ready}")
-      ready
-    end
-  rescue => e
-    erro("Error checking cache readiness: #{e.message}")
-    false
-  end
-
-  def self.is_test_data?(data)
-    parsed = JSON.parse(data)
-    parsed.is_a?(Hash) && parsed.keys == ["test"] && parsed["test"] == "data"
-  rescue JSON::ParserError
-    false
-  end
-
-  def self.acquire_lock(timeout = LOCK_TIMEOUT)
-    lock_mutex.synchronize do
-      acquired = with_redis do |redis|
-        redis.set(lock_key, true, nx: true, px: timeout)
-      end
-      debu("Lock acquisition attempt result: #{acquired}")
-      lock_cv.signal if acquired
-      acquired
-    end
-  end
-
-  def self.release_lock
-    lock_mutex.synchronize do
-      with_redis do |redis|
-        redis.del(lock_key)
-      end
-      debu("Lock released")
-      lock_cv.signal
-    end
-  end
-
-  COMPRESSION_LEVEL = Zlib::BEST_COMPRESSION
-
   set :bind, '0.0.0.0'
 
   get '/healthz' do
@@ -251,82 +266,69 @@ class MyApp < Sinatra::Base
     body "Health OK"
   end
 
-  get '/data' do
-    debu("Received request at /data")
-    debu("If-None-Match: #{request.env['HTTP_IF_NONE_MATCH']}")
-    debu("If-Modified-Since: #{request.env['HTTP_IF_MODIFIED_SINCE']}")
-    debu("Cache-Control: #{request.env['HTTP_CACHE_CONTROL']}")
-
-    accept_encoding = request.env['HTTP_ACCEPT_ENCODING'] || request.env['Accept-Encoding']
-    debu("Accept-Encoding: #{accept_encoding}")
-    debu("Raw headers: #{request.env.select { |k, v| k.start_with?('HTTP_') }}")
-
-    begin
-      if cache_ready?
-        content_type :json
-        cached_data = with_redis { |redis| redis.get(self.class.cache_key) }
-        compressed_data = with_redis { |redis| redis.get("#{self.class.cache_key}_compressed") }
-        last_modified = with_redis { |redis| redis.get("#{self.class.cache_key}_last_modified") }
-        etag = with_redis { |redis| redis.get("#{self.class.cache_key}_etag") }
-
-        if etag.nil?
-          etag = Digest::MD5.hexdigest(cached_data)
-          with_redis do |redis|
-            redis.set("#{self.class.cache_key}_etag", etag)
-          end
-        end
-
-        # Set caching headers
-        headers['Last-Modified'] = last_modified if last_modified
-        headers['ETag'] = etag
-        headers['Cache-Control'] = 'public, max-age=86400, must-revalidate'
-        headers['Vary'] = 'Accept-Encoding'
-
-        # Check if the client's cached version is still valid
-        client_etag = request.env['HTTP_IF_NONE_MATCH']
-        if client_etag && client_etag == etag
-          debu("Cache hit: Client cache is still valid, returning 304")
-          status 304
-          return
-        else
-          debu("Cache miss: Client cache is stale or non-existent")
-        end
-
-        if compressed_data.nil?
-          debu("Compressed data not found in cache, compressing now")
-          compressed_data = StringIO.new.tap do |io|
-            gz = Zlib::GzipWriter.new(io, COMPRESSION_LEVEL)
-            gz.write(cached_data)
-            gz.close
-          end.string
-          with_redis do |redis|
-            redis.set("#{self.class.cache_key}_compressed", compressed_data)
-          end
-        end
-
-        if accept_encoding&.include?('gzip')
-          headers['Content-Encoding'] = 'gzip'
-          response_body = compressed_data
-          debu("Serving compressed data (gzip). Size: #{response_body.bytesize} bytes")
-        else
-          response_body = cached_data
-          debu("Serving uncompressed data. Size: #{response_body.bytesize} bytes")
-        end
-
-        status 200
-        body response_body
-      else
-        debu("Cache not ready or contains test data, publishing please_update_now message")
-        with_redis { |redis| redis.publish("please_update_now", "true") }
-        status 202
-        body "Cache is updating, please try again later."
-      end
-    rescue => e
-      erro("Error in /data route: #{e.message}")
-      erro(e.backtrace.join("\n"))
-      status 500
-      body "An error occurred while processing your request."
+  def log_request_headers
+    %w[If-None-Match If-Modified-Since Cache-Control].each do |header|
+      debu("#{header}: #{request.env["HTTP_#{header.upcase.gsub('-', '_')}"]}")
     end
+    debu("Accept-Encoding: #{request.env['HTTP_ACCEPT_ENCODING'] || request.env['Accept-Encoding']}")
+    debu("Raw headers: #{request.env.select { |k, v| k.start_with?('HTTP_') }}")
+  end
+
+  def serve_cached_data
+    content_type :json
+    etag = self.class.in_memory_etag
+    last_modified = self.class.in_memory_last_modified
+
+    headers['ETag'] = etag
+    headers['Last-Modified'] = last_modified
+    headers['Cache-Control'] = 'public, max-age=86400, must-revalidate'
+    headers['Vary'] = 'Accept-Encoding'
+
+    if client_cache_valid?(etag)
+      status 304
+      return
+    end
+
+    accept_encoding = request.env['HTTP_ACCEPT_ENCODING'] || ''
+    if accept_encoding.include?('gzip')
+      headers['Content-Encoding'] = 'gzip'
+      body self.class.in_memory_compressed_data
+    else
+      body Zlib::Inflate.inflate(self.class.in_memory_compressed_data)
+    end
+  rescue => e
+    erro("Error serving cached data: #{e.message}")
+    status 500
+    body "An error occurred while processing your request."
+  end
+
+  def client_cache_valid?(etag)
+    client_etag = request.env['HTTP_IF_NONE_MATCH']
+    if client_etag && client_etag == etag
+      debu("Cache hit: Client cache is still valid, returning 304")
+      true
+    else
+      debu("Cache miss: Client cache is stale or non-existent")
+      false
+    end
+  end
+
+  def request_cache_update
+    debu("Cache not ready or contains test data, publishing please_update_now message")
+    with_redis { |redis| redis.publish("please_update_now", "true") }
+    status 202
+    body "Cache is updating, please try again later."
+  rescue => e
+    erro("Error requesting cache update: #{e.message}")
+    status 202  # Keep the 202 status even if there's an error
+    body "Cache is updating, please try again later."
+  end
+
+  def handle_data_error(error)
+    erro("Error in /data route: #{error.message}")
+    erro(error.backtrace.join("\n"))
+    status 500
+    body "An error occurred while processing your request."
   end
 
   def self.start_threads
@@ -394,38 +396,6 @@ class MyApp < Sinatra::Base
     @listener_thread.kill if @listener_thread
     info("Gracefully shutting down...")
     exit
-  end
-
-  def self.update_cache
-    debu("Updating cache")
-    data = fetch_data
-    debu("Data fetched: #{data.inspect}")
-    if data.nil? || data.empty?
-      erro("Error: Fetched data is nil or empty")
-      return
-    end
-    json_data = data.to_json
-    compressed_data = StringIO.new.tap do |io|
-      gz = Zlib::GzipWriter.new(io, COMPRESSION_LEVEL)
-      gz.write(json_data)
-      gz.close
-    end.string
-    etag = Digest::MD5.hexdigest(json_data)
-    current_time = Time.now.httpdate
-    with_redis do |redis|
-      redis.set(cache_key, json_data)
-      redis.set("#{cache_key}_compressed", compressed_data)
-      redis.set("#{cache_key}_last_modified", current_time)
-      redis.set("#{cache_key}_etag", etag)
-      redis.expire(cache_key, 86460) # Set TTL to 24 hours + 1 minute
-      redis.expire("#{cache_key}_compressed", 86460)
-      redis.expire("#{cache_key}_last_modified", 86460)
-      redis.expire("#{cache_key}_etag", 86460)
-    end
-    debu("Cache updated, new value size: #{json_data.bytesize} bytes, compressed size: #{compressed_data.bytesize} bytes")
-    release_lock
-    debu("Cache updated and lock released")
-    cache_updated
   end
 
   def on_message(channel, message)
