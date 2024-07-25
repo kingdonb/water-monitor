@@ -10,6 +10,12 @@ This project aims to create a service that acts as an intermediary between end-u
 
 This approach significantly reduces load times for end-users while maintaining reasonably up-to-date information.
 
+In development, you can see the live service here (and test its performance):
+
+[water.teamhephy.info](https://water.teamhephy.info/data)
+
+This dev service is hosted on a Cable modem, on my home network, and its backend cache is on the other side of a (slow-ish) Wi-Fi link.
+
 ### Development Phases
 
 1. **Ruby Proof-of-Concept**: Initially, we're implementing this as a single-class proof-of-concept in pure Ruby with native extensions (gems, some parts written in C).
