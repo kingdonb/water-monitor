@@ -40,11 +40,11 @@ class MyAppTest < Minitest::Test
 
   def test_data_endpoint_when_cache_not_ready
     MyApp.stubs(:cache_ready?).returns(false)
-    MyApp.any_instance.stubs(:request_cache_update).returns([202, {}, 'Cache updating'])
+    # MyApp.any_instance.stubs(:request_cache_update).returns(nil)
 
     get '/data'
     assert_equal 202, last_response.status
-    assert_equal 'Cache updating', last_response.body
+    assert_equal 'Cache is updating, please try again later.', last_response.body
   end
 
   def test_cache_update_process

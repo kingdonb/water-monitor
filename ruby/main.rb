@@ -141,6 +141,7 @@ module CacheHelpers
       with_redis do |redis|
         redis.del(lock_key)
       end
+      debu("Lock released")
     end
   end
 
@@ -231,12 +232,12 @@ class MyApp < Sinatra::Base
 
   def serve_compressed_response
     headers['Content-Encoding'] = GZIP_ENCODING
-    body self.class.in_memory_compressed_data
+    body self.class.in_memory_compressed_data.to_s
     log_request(request: request, response: response, data_sent: true, compressed: true)
   end
 
   def serve_uncompressed_response
-    body Zlib::Inflate.inflate(self.class.in_memory_compressed_data)
+    body Zlib::Inflate.inflate(self.class.in_memory_compressed_data.to_s)
     log_request(request: request, response: response, data_sent: true, compressed: false)
   end
 
