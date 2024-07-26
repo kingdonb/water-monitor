@@ -13,7 +13,10 @@ COMPRESSION_LEVEL = 1  # You can adjust this value as needed
 module CacheHelpers
   include Loggable
 
+  CACHE_DURATION = 86_400 # expire caches after 1 day (testing: after 60s)
   LOCK_TIMEOUT = 15_000 # 15 seconds in milliseconds
+  CACHE_CONTROL_HEADER = "public, max-age=#{CACHE_DURATION}, must-revalidate"
+  GZIP_ENCODING = 'gzip'
 
   def self.included(base)
     base.extend(ClassMethods)
@@ -35,7 +38,12 @@ module CacheHelpers
 
       if response.is_a?(Net::HTTPSuccess)
         data = JSON.parse(response.body)
-        response_size = response.body.bytesize
+        response_body = if response.body.respond_to? :first
+                          response.body.first
+                        else
+                          response.body
+                        end
+        response_size = response_body.bytesize
         debu("Data fetched successfully. Response size: #{response_size} bytes")
         if response_size <= 400
           debu("Response body: #{response.body}")
@@ -69,7 +77,7 @@ module CacheHelpers
                     @in_memory_etag.nil? || @in_memory_etag.empty?
 
       last_modified_time = Time.parse(@in_memory_last_modified)
-      if current_time - last_modified_time > 86400 # 24 hours
+      if current_time - last_modified_time > CACHE_DURATION # 24 hours
         debu("Cache not ready: data is stale")
         return false
       end
@@ -91,7 +99,6 @@ module CacheHelpers
     def update_cache
       debu("Updating cache")
       data = fetch_data
-      debu("Data fetched: #{data.inspect}")
       if data.nil? || data.empty?
         erro("Error: Fetched data is nil or empty")
         return
@@ -125,20 +132,22 @@ module CacheHelpers
     end
 
     def set_cache_data(redis, json_data, compressed_data, etag, current_time)
+      expiry_time = CACHE_DURATION - 30
       redis.set(cache_key, json_data)
       redis.set("#{cache_key}_compressed", compressed_data)
       redis.set("#{cache_key}_last_modified", current_time)
       redis.set("#{cache_key}_etag", etag)
-      redis.expire(cache_key, 86460) # Set TTL to 24 hours + 1 minute
-      redis.expire("#{cache_key}_compressed", 86460)
-      redis.expire("#{cache_key}_last_modified", 86460)
-      redis.expire("#{cache_key}_etag", 86460)
+      redis.expire(cache_key, expiry_time) # Set TTL to 24 hours - 30s
+      redis.expire("#{cache_key}_compressed", expiry_time)
+      redis.expire("#{cache_key}_last_modified", expiry_time)
+      redis.expire("#{cache_key}_etag", expiry_time)
     end
 
     def release_lock
       with_redis do |redis|
         redis.del(lock_key)
       end
+      debu("Lock released")
     end
   end
 
@@ -164,29 +173,107 @@ class MyApp < Sinatra::Base
     set :environment, ENV['RACK_ENV'] || 'development'
   end
 
+  def handle_data_request
+    if self.class.cache_ready?
+      serve_cached_data
+    else
+      request_cache_update
+      log_request(request: request, response: response, data_sent: false, compressed: false)
+    end
+  rescue => e
+    handle_data_error(e)
+  end
+
   get '/data' do
-    data
+    handle_data_request
   end
 
   get '/test' do
     'Test route'
   end
 
-  def data
-    debu("Received request at /data")
-    log_request_headers
-    begin
-      if self.class.cache_ready?
-        serve_cached_data
-      else
-        request_cache_update
-      end
-    rescue => e
-      erro("Error in /data route: #{e.message}")
-      erro(e.backtrace.join("\n"))
-      status 500
-      body "An error occurred while processing your request."
+  def handle_data_error(error)
+    erro("Error in /data route: #{error.message}")
+    erro(error.backtrace.join("\n"))
+    status 500
+    body "An error occurred while processing your request."
+    log_request(request: request, response: response, data_sent: false, compressed: false)
+  end
+
+  def serve_cached_data
+    set_response_headers
+
+    if client_cache_valid?(self.class.in_memory_etag)
+      status 304
+      log_request(request: request, response: response, data_sent: false, compressed: false)
+      return
     end
+
+    serve_appropriate_response
+  rescue => e
+    handle_serve_error(e)
+  end
+
+  private
+
+  def set_response_headers
+    content_type :json
+    headers['ETag'] = self.class.in_memory_etag
+    headers['Last-Modified'] = self.class.in_memory_last_modified
+    headers['Cache-Control'] = CACHE_CONTROL_HEADER
+    headers['Vary'] = 'Accept-Encoding'
+  end
+
+  def serve_appropriate_response
+    if client_accepts_gzip?
+      serve_compressed_response
+    else
+      serve_uncompressed_response
+    end
+  end
+
+  def client_accepts_gzip?
+    (request.env['HTTP_ACCEPT_ENCODING'] || '').include?(GZIP_ENCODING)
+  end
+
+  def serve_compressed_response
+    headers['Content-Encoding'] = GZIP_ENCODING
+    body self.class.in_memory_compressed_data.to_s
+    log_request(request: request, response: response, data_sent: true, compressed: true)
+  end
+
+  def serve_uncompressed_response
+    body Zlib::Inflate.inflate(self.class.in_memory_compressed_data.to_s)
+    log_request(request: request, response: response, data_sent: true, compressed: false)
+  end
+
+  def handle_serve_error(error)
+    erro("Error serving cached data: #{error.message}")
+    status 500
+    body "An error occurred while processing your request."
+    log_request(request: request, response: response, data_sent: false, compressed: false)
+  end
+
+  def client_cache_valid?(etag)
+    client_etag = request.env['HTTP_IF_NONE_MATCH']
+    if client_etag && client_etag == etag
+      debu("Cache hit: Client cache is still valid, returning 304")
+      true
+    else
+      debu("Cache miss: Client cache is stale or non-existent")
+      false
+    end
+  end
+
+  def request_cache_update
+    debu("Cache not ready or contains test data, publishing please_update_now message")
+    with_redis { |redis| redis.publish("please_update_now", "true") }
+    status 202
+    body "Cache is updating, please try again later."
+  rescue => e
+    erro("Error requesting cache update: #{e.message}")
+    status 202  # Keep the 202 status even if there's an error
+    body "Cache is updating, please try again later."
   end
 
   class << self
@@ -195,11 +282,11 @@ class MyApp < Sinatra::Base
     attr_accessor :in_memory_etag, :in_memory_compressed_data, :in_memory_last_modified
     attr_accessor :last_redis_check
     attr_accessor :app_initialized
+    attr_accessor :cron_interval
 
     def update_cache
       debu("Updating cache")
       data = fetch_data
-      debu("Data fetched: #{data.inspect}")
       if data.nil? || data.empty?
         erro("Error: Fetched data is nil or empty")
         return
@@ -264,6 +351,7 @@ class MyApp < Sinatra::Base
     # test redis connection (later)
     status 200
     body "Health OK"
+    log_request(request: request, response: response, data_sent: true, compressed: false, level: :debug)
   end
 
   def log_request_headers
@@ -272,63 +360,6 @@ class MyApp < Sinatra::Base
     end
     debu("Accept-Encoding: #{request.env['HTTP_ACCEPT_ENCODING'] || request.env['Accept-Encoding']}")
     debu("Raw headers: #{request.env.select { |k, v| k.start_with?('HTTP_') }}")
-  end
-
-  def serve_cached_data
-    content_type :json
-    etag = self.class.in_memory_etag
-    last_modified = self.class.in_memory_last_modified
-
-    headers['ETag'] = etag
-    headers['Last-Modified'] = last_modified
-    headers['Cache-Control'] = 'public, max-age=86400, must-revalidate'
-    headers['Vary'] = 'Accept-Encoding'
-
-    if client_cache_valid?(etag)
-      status 304
-      return
-    end
-
-    accept_encoding = request.env['HTTP_ACCEPT_ENCODING'] || ''
-    if accept_encoding.include?('gzip')
-      headers['Content-Encoding'] = 'gzip'
-      body self.class.in_memory_compressed_data
-    else
-      body Zlib::Inflate.inflate(self.class.in_memory_compressed_data)
-    end
-  rescue => e
-    erro("Error serving cached data: #{e.message}")
-    status 500
-    body "An error occurred while processing your request."
-  end
-
-  def client_cache_valid?(etag)
-    client_etag = request.env['HTTP_IF_NONE_MATCH']
-    if client_etag && client_etag == etag
-      debu("Cache hit: Client cache is still valid, returning 304")
-      true
-    else
-      debu("Cache miss: Client cache is stale or non-existent")
-      false
-    end
-  end
-
-  def request_cache_update
-    debu("Cache not ready or contains test data, publishing please_update_now message")
-    with_redis { |redis| redis.publish("please_update_now", "true") }
-    status 202
-    body "Cache is updating, please try again later."
-  rescue => e
-    erro("Error requesting cache update: #{e.message}")
-    status 202  # Keep the 202 status even if there's an error
-    body "Cache is updating, please try again later."
-  end
-
-  def handle_data_error(error)
-    erro("Error in /data route: #{error.message}")
-    erro(error.backtrace.join("\n"))
-    status 500
-    body "An error occurred while processing your request."
   end
 
   def self.start_threads
@@ -376,10 +407,15 @@ class MyApp < Sinatra::Base
         if !cache_ready?
           debu("Cache is not ready or stale")
           if acquire_lock
+            debu("Lock acquired in cron thread, updating cache")
             update_cache
+          else
+            debu("Failed to acquire lock in cron thread")
           end
+        else
+          debu("Cache is ready, no update needed")
         end
-        sleep 86400 # 24 hours
+        sleep @cron_interval || CACHE_DURATION # Use configurable interval or default to 24 hours
         debu("cron_thread woke up")
       end
     ensure
@@ -438,18 +474,21 @@ end
 # Set the log level for MyApp
 MyApp.set_log_level(ENV['LOG_LEVEL'])
 
-# Start the application and threads after setting the log level
+# Initialize the app
 MyApp.initialize_app(ENV['REDIS_URL'])
 
-server_thread = Thread.new do
-  MyApp.run! if MyApp.app_file == $0
+if __FILE__ == $0
+  # Start the application and threads only when the script is run directly
+  server_thread = Thread.new do
+    MyApp.run!
+  end
+
+  # Ensure the server has time to start
+  sleep 1
+
+  # Start background threads
+  MyApp.start_threads
+
+  # Keep the main thread alive to handle interrupts
+  server_thread.join
 end
-
-# Ensure the server has time to start
-sleep 1
-
-# Start background threads
-MyApp.start_threads
-
-# Keep the main thread alive to handle interrupts
-server_thread.join

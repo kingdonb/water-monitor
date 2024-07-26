@@ -1,5 +1,5 @@
 module Loggable
-  LOG_LEVELS = { debu: 0, info: 1, warn: 2, erro: 3 }
+  LOG_LEVELS = { debu: 0, info: 1, erro: 3 }
 
   def self.included(base)
     base.extend(ClassMethods)
@@ -22,16 +22,36 @@ module Loggable
 
   extend ClassMethods
 
-  [:debu, :info, :warn, :erro].each do |level|
+  [:debu, :info, :erro].each do |level|
     define_method(level) do |message|
+      # puts "log(#{level}, #{message})"
       log(level, message)
     end
+  end
+
+  def log_request(request:, response:, data_sent:, compressed:, level: :info)
+    path = request.path_info
+    status = response.status
+    response_body = if response.body.respond_to? :first
+                      response.body.first
+                    else
+                      response.body
+                    end
+    data_size = data_sent ? response_body&.bytesize : 0
+    compression_status = compressed ? "compressed" : "uncompressed"
+    cache_status = data_sent ? "served" : "not served"
+
+    message = "Request: #{path} | Status: #{status} | Data: #{cache_status} (#{data_size} bytes, #{compression_status})"
+
+    log(level, message)
   end
 
   private
 
   def log(level, message)
-    if LOG_LEVELS[level] >= current_log_level
+  # in case :debug or :error is passed in, use :debu and :erro instead
+    level_sym = level.to_s[...4].to_sym
+    if LOG_LEVELS[level_sym] >= current_log_level
       puts "[#{level.to_s.upcase}] #{message}"
     end
   end
