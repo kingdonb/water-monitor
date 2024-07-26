@@ -71,12 +71,13 @@ class MyAppTest < Minitest::Test
   def test_cron_thread_updates_cache
     MyApp.cron_interval = 1 # Set to 1 second for testing
     MyApp.stubs(:cache_ready?).returns(false)
-    MyApp.expects(:update_cache).at_least_once
+    MyApp.expects(:update_cache).at_least(2)
 
     # Start the cron thread
     MyApp.start_threads
 
     # Wait for the cron thread to run
+    # (it runs once on startup, then again after cron_interval)
     sleep 2
 
     # No need to call MyApp.shutdown here

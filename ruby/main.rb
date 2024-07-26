@@ -37,7 +37,12 @@ module CacheHelpers
 
       if response.is_a?(Net::HTTPSuccess)
         data = JSON.parse(response.body)
-        response_size = response.body&.first&.bytesize
+        response_body = if response.body.respond_to? :first
+                          response.body.first
+                        else
+                          response.body
+                        end
+        response_size = response_body.bytesize
         debu("Data fetched successfully. Response size: #{response_size} bytes")
         if response_size <= 400
           debu("Response body: #{response.body}")

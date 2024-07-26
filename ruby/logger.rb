@@ -31,7 +31,12 @@ module Loggable
   def log_request(request:, response:, data_sent:, compressed:, level: :info)
     path = request.path_info
     status = response.status
-    data_size = data_sent ? response.body&.first&.bytesize : 0
+    response_body = if response.body.respond_to? :first
+                      response.body.first
+                    else
+                      response.body
+                    end
+    data_size = data_sent ? response_body&.bytesize : 0
     compression_status = compressed ? "compressed" : "uncompressed"
     cache_status = data_sent ? "served" : "not served"
 
