@@ -67,6 +67,36 @@ class MyAppTest < Minitest::Test
     assert_equal 200, last_response.status
     assert_equal 'Health OK', last_response.body
   end
+
+  def test_cron_thread_updates_cache
+    MyApp.cron_interval = 1 # Set to 1 second for testing
+    MyApp.stubs(:cache_ready?).returns(false)
+    MyApp.expects(:update_cache).at_least_once
+
+    # Start the cron thread
+    MyApp.start_threads
+
+    # Wait for the cron thread to run
+    sleep 2
+
+    # No need to call MyApp.shutdown here
+
+    # Verify that update_cache was called
+    # The expectation is automatically verified when the test method ends
+  end
+
+  def teardown
+    # Stop the threads
+    MyApp.instance_variable_get(:@cron_thread)&.kill
+    MyApp.instance_variable_get(:@listener_thread)&.kill
+
+    # Reset any stubbed methods
+    MyApp.unstub(:cache_ready?)
+    MyApp.unstub(:update_cache)
+
+    # Reset the cron interval
+    MyApp.cron_interval = nil
+  end
 end
 
 class MockRedis
@@ -74,7 +104,7 @@ class MockRedis
     @data = {}
   end
 
-  def set(key, value)
+  def set(key, value, options = {})
     @data[key] = value
   end
 

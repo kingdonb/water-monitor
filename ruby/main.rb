@@ -276,6 +276,7 @@ class MyApp < Sinatra::Base
     attr_accessor :in_memory_etag, :in_memory_compressed_data, :in_memory_last_modified
     attr_accessor :last_redis_check
     attr_accessor :app_initialized
+    attr_accessor :cron_interval
 
     def update_cache
       debu("Updating cache")
@@ -401,10 +402,15 @@ class MyApp < Sinatra::Base
         if !cache_ready?
           debu("Cache is not ready or stale")
           if acquire_lock
+            debu("Lock acquired in cron thread, updating cache")
             update_cache
+          else
+            debu("Failed to acquire lock in cron thread")
           end
+        else
+          debu("Cache is ready, no update needed")
         end
-        sleep 86400 # 24 hours
+        sleep @cron_interval || 86400 # Use configurable interval or default to 24 hours
         debu("cron_thread woke up")
       end
     ensure
@@ -463,18 +469,21 @@ end
 # Set the log level for MyApp
 MyApp.set_log_level(ENV['LOG_LEVEL'])
 
-# Start the application and threads after setting the log level
+# Initialize the app
 MyApp.initialize_app(ENV['REDIS_URL'])
 
-server_thread = Thread.new do
-  MyApp.run! if MyApp.app_file == $0
+if __FILE__ == $0
+  # Start the application and threads only when the script is run directly
+  server_thread = Thread.new do
+    MyApp.run!
+  end
+
+  # Ensure the server has time to start
+  sleep 1
+
+  # Start background threads
+  MyApp.start_threads
+
+  # Keep the main thread alive to handle interrupts
+  server_thread.join
 end
-
-# Ensure the server has time to start
-sleep 1
-
-# Start background threads
-MyApp.start_threads
-
-# Keep the main thread alive to handle interrupts
-server_thread.join
