@@ -14,6 +14,8 @@ module CacheHelpers
   include Loggable
 
   LOCK_TIMEOUT = 15_000 # 15 seconds in milliseconds
+  CACHE_CONTROL_HEADER = 'public, max-age=86400, must-revalidate'
+  GZIP_ENCODING = 'gzip'
 
   def self.included(base)
     base.extend(ClassMethods)
@@ -35,7 +37,7 @@ module CacheHelpers
 
       if response.is_a?(Net::HTTPSuccess)
         data = JSON.parse(response.body)
-        response_size = response.body.bytesize
+        response_size = response.body&.first&.bytesize
         debu("Data fetched successfully. Response size: #{response_size} bytes")
         if response_size <= 400
           debu("Response body: #{response.body}")
@@ -164,29 +166,107 @@ class MyApp < Sinatra::Base
     set :environment, ENV['RACK_ENV'] || 'development'
   end
 
+  def handle_data_request
+    if self.class.cache_ready?
+      serve_cached_data
+    else
+      request_cache_update
+      log_request(request: request, response: response, data_sent: false, compressed: false)
+    end
+  rescue => e
+    handle_data_error(e)
+  end
+
   get '/data' do
-    data
+    handle_data_request
   end
 
   get '/test' do
     'Test route'
   end
 
-  def data
-    debu("Received request at /data")
-    log_request_headers
-    begin
-      if self.class.cache_ready?
-        serve_cached_data
-      else
-        request_cache_update
-      end
-    rescue => e
-      erro("Error in /data route: #{e.message}")
-      erro(e.backtrace.join("\n"))
-      status 500
-      body "An error occurred while processing your request."
+  def handle_data_error(error)
+    erro("Error in /data route: #{error.message}")
+    erro(error.backtrace.join("\n"))
+    status 500
+    body "An error occurred while processing your request."
+    log_request(request: request, response: response, data_sent: false, compressed: false)
+  end
+
+  def serve_cached_data
+    set_response_headers
+
+    if client_cache_valid?(self.class.in_memory_etag)
+      status 304
+      log_request(request: request, response: response, data_sent: false, compressed: false)
+      return
     end
+
+    serve_appropriate_response
+  rescue => e
+    handle_serve_error(e)
+  end
+
+  private
+
+  def set_response_headers
+    content_type :json
+    headers['ETag'] = self.class.in_memory_etag
+    headers['Last-Modified'] = self.class.in_memory_last_modified
+    headers['Cache-Control'] = CACHE_CONTROL_HEADER
+    headers['Vary'] = 'Accept-Encoding'
+  end
+
+  def serve_appropriate_response
+    if client_accepts_gzip?
+      serve_compressed_response
+    else
+      serve_uncompressed_response
+    end
+  end
+
+  def client_accepts_gzip?
+    (request.env['HTTP_ACCEPT_ENCODING'] || '').include?(GZIP_ENCODING)
+  end
+
+  def serve_compressed_response
+    headers['Content-Encoding'] = GZIP_ENCODING
+    body self.class.in_memory_compressed_data
+    log_request(request: request, response: response, data_sent: true, compressed: true)
+  end
+
+  def serve_uncompressed_response
+    body Zlib::Inflate.inflate(self.class.in_memory_compressed_data)
+    log_request(request: request, response: response, data_sent: true, compressed: false)
+  end
+
+  def handle_serve_error(error)
+    erro("Error serving cached data: #{error.message}")
+    status 500
+    body "An error occurred while processing your request."
+    log_request(request: request, response: response, data_sent: false, compressed: false)
+  end
+
+  def client_cache_valid?(etag)
+    client_etag = request.env['HTTP_IF_NONE_MATCH']
+    if client_etag && client_etag == etag
+      debu("Cache hit: Client cache is still valid, returning 304")
+      true
+    else
+      debu("Cache miss: Client cache is stale or non-existent")
+      false
+    end
+  end
+
+  def request_cache_update
+    debu("Cache not ready or contains test data, publishing please_update_now message")
+    with_redis { |redis| redis.publish("please_update_now", "true") }
+    status 202
+    body "Cache is updating, please try again later."
+  rescue => e
+    erro("Error requesting cache update: #{e.message}")
+    status 202  # Keep the 202 status even if there's an error
+    body "Cache is updating, please try again later."
   end
 
   class << self
@@ -264,6 +344,7 @@ class MyApp < Sinatra::Base
     # test redis connection (later)
     status 200
     body "Health OK"
+    log_request(request: request, response: response, data_sent: true, compressed: false, level: :debug)
   end
 
   def log_request_headers
@@ -272,63 +353,6 @@ class MyApp < Sinatra::Base
     end
     debu("Accept-Encoding: #{request.env['HTTP_ACCEPT_ENCODING'] || request.env['Accept-Encoding']}")
     debu("Raw headers: #{request.env.select { |k, v| k.start_with?('HTTP_') }}")
-  end
-
-  def serve_cached_data
-    content_type :json
-    etag = self.class.in_memory_etag
-    last_modified = self.class.in_memory_last_modified
-
-    headers['ETag'] = etag
-    headers['Last-Modified'] = last_modified
-    headers['Cache-Control'] = 'public, max-age=86400, must-revalidate'
-    headers['Vary'] = 'Accept-Encoding'
-
-    if client_cache_valid?(etag)
-      status 304
-      return
-    end
-
-    accept_encoding = request.env['HTTP_ACCEPT_ENCODING'] || ''
-    if accept_encoding.include?('gzip')
-      headers['Content-Encoding'] = 'gzip'
-      body self.class.in_memory_compressed_data
-    else
-      body Zlib::Inflate.inflate(self.class.in_memory_compressed_data)
-    end
-  rescue => e
-    erro("Error serving cached data: #{e.message}")
-    status 500
-    body "An error occurred while processing your request."
-  end
-
-  def client_cache_valid?(etag)
-    client_etag = request.env['HTTP_IF_NONE_MATCH']
-    if client_etag && client_etag == etag
-      debu("Cache hit: Client cache is still valid, returning 304")
-      true
-    else
-      debu("Cache miss: Client cache is stale or non-existent")
-      false
-    end
-  end
-
-  def request_cache_update
-    debu("Cache not ready or contains test data, publishing please_update_now message")
-    with_redis { |redis| redis.publish("please_update_now", "true") }
-    status 202
-    body "Cache is updating, please try again later."
-  rescue => e
-    erro("Error requesting cache update: #{e.message}")
-    status 202  # Keep the 202 status even if there's an error
-    body "Cache is updating, please try again later."
-  end
-
-  def handle_data_error(error)
-    erro("Error in /data route: #{error.message}")
-    erro(error.backtrace.join("\n"))
-    status 500
-    body "An error occurred while processing your request."
   end
 
   def self.start_threads

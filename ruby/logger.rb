@@ -28,10 +28,24 @@ module Loggable
     end
   end
 
+  def log_request(request:, response:, data_sent:, compressed:, level: :info)
+    path = request.path_info
+    status = response.status
+    data_size = data_sent ? response.body&.first&.bytesize : 0
+    compression_status = compressed ? "compressed" : "uncompressed"
+    cache_status = data_sent ? "served" : "not served"
+
+    message = "Request: #{path} | Status: #{status} | Data: #{cache_status} (#{data_size} bytes, #{compression_status})"
+
+    log(level, message)
+  end
+
   private
 
   def log(level, message)
-    if LOG_LEVELS[level] >= current_log_level
+  # in case :debug or :error is passed in, use :debu and :erro instead
+    level_sym = level.to_s[...4].to_sym
+    if LOG_LEVELS[level_sym] >= current_log_level
       puts "[#{level.to_s.upcase}] #{message}"
     end
   end
