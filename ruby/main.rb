@@ -13,8 +13,9 @@ COMPRESSION_LEVEL = 1  # You can adjust this value as needed
 module CacheHelpers
   include Loggable
 
+  CACHE_DURATION = 86_400 # expire caches after 1 day (testing: after 60s)
   LOCK_TIMEOUT = 15_000 # 15 seconds in milliseconds
-  CACHE_CONTROL_HEADER = 'public, max-age=86400, must-revalidate'
+  CACHE_CONTROL_HEADER = "public, max-age=#{CACHE_DURATION}, must-revalidate"
   GZIP_ENCODING = 'gzip'
 
   def self.included(base)
@@ -76,7 +77,7 @@ module CacheHelpers
                     @in_memory_etag.nil? || @in_memory_etag.empty?
 
       last_modified_time = Time.parse(@in_memory_last_modified)
-      if current_time - last_modified_time > 86400 # 24 hours
+      if current_time - last_modified_time > CACHE_DURATION # 24 hours
         debu("Cache not ready: data is stale")
         return false
       end
@@ -131,14 +132,15 @@ module CacheHelpers
     end
 
     def set_cache_data(redis, json_data, compressed_data, etag, current_time)
+      expiry_time = CACHE_DURATION - 30
       redis.set(cache_key, json_data)
       redis.set("#{cache_key}_compressed", compressed_data)
       redis.set("#{cache_key}_last_modified", current_time)
       redis.set("#{cache_key}_etag", etag)
-      redis.expire(cache_key, 86460) # Set TTL to 24 hours + 1 minute
-      redis.expire("#{cache_key}_compressed", 86460)
-      redis.expire("#{cache_key}_last_modified", 86460)
-      redis.expire("#{cache_key}_etag", 86460)
+      redis.expire(cache_key, expiry_time) # Set TTL to 24 hours - 30s
+      redis.expire("#{cache_key}_compressed", expiry_time)
+      redis.expire("#{cache_key}_last_modified", expiry_time)
+      redis.expire("#{cache_key}_etag", expiry_time)
     end
 
     def release_lock
@@ -413,7 +415,7 @@ class MyApp < Sinatra::Base
         else
           debu("Cache is ready, no update needed")
         end
-        sleep @cron_interval || 86400 # Use configurable interval or default to 24 hours
+        sleep @cron_interval || CACHE_DURATION # Use configurable interval or default to 24 hours
         debu("cron_thread woke up")
       end
     ensure
