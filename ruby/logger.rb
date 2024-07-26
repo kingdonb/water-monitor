@@ -24,7 +24,7 @@ module Loggable
 
   [:debu, :info, :erro].each do |level|
     define_method(level) do |message|
-      puts "log(#{level}, #{message})"
+      # puts "log(#{level}, #{message})"
       log(level, message)
     end
   end
