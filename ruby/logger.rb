@@ -1,5 +1,5 @@
 module Loggable
-  LOG_LEVELS = { debu: 0, info: 1, warn: 2, erro: 3 }
+  LOG_LEVELS = { debu: 0, info: 1, erro: 3 }
 
   def self.included(base)
     base.extend(ClassMethods)
@@ -22,7 +22,7 @@ module Loggable
 
   extend ClassMethods
 
-  [:debu, :info, :warn, :erro].each do |level|
+  [:debu, :info, :erro].each do |level|
     define_method(level) do |message|
       log(level, message)
     end
