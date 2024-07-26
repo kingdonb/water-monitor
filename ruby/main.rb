@@ -98,7 +98,6 @@ module CacheHelpers
     def update_cache
       debu("Updating cache")
       data = fetch_data
-      # debu("Data fetched: #{data.inspect}")
       if data.nil? || data.empty?
         erro("Error: Fetched data is nil or empty")
         return
@@ -286,7 +285,6 @@ class MyApp < Sinatra::Base
     def update_cache
       debu("Updating cache")
       data = fetch_data
-      # debu("Data fetched: #{data.inspect}")
       if data.nil? || data.empty?
         erro("Error: Fetched data is nil or empty")
         return
