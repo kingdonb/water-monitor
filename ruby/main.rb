@@ -221,6 +221,7 @@ class MyApp < Sinatra::Base
     headers['ETag'] = self.class.in_memory_etag
     headers['Last-Modified'] = self.class.in_memory_last_modified
     headers['Cache-Control'] = CACHE_CONTROL_HEADER
+    headers['Access-Control-Allow-Origin'] = '*'
     headers['Vary'] = 'Accept-Encoding'
   end
 
