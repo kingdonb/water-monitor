@@ -10,7 +10,56 @@ This project aims to create a service that acts as an intermediary between end-u
 
 This approach significantly reduces load times for end-users while maintaining reasonably up-to-date information.
 
-### Development Environment
+## Ruby Application Details
+
+### Key Features
+
+1. **Efficient Caching**: The application pulls data once a day from the USGS water services API and caches it, reducing the load on the backend service.
+2. **Compression**: Cached data is compressed to optimize storage and transfer.
+3. **Conditional Responses**: Supports ETag and Last-Modified headers for efficient client-side caching.
+4. **GZIP Support**: Serves compressed responses to clients that accept GZIP encoding.
+5. **Redis Integration**: Uses Redis for distributed caching and inter-process communication.
+6. **Background Processing**: Employs separate threads for cache updates and listening to update requests.
+7. **Configurable Logging**: Includes a custom logging module with configurable log levels.
+8. **Health Check Endpoint**: Provides a basic health check endpoint for monitoring.
+
+### How It Works
+
+1. The application initializes by setting up Redis connections and starting background threads for cache management.
+2. When a client requests data:
+   - If the cache is ready, it serves the cached data.
+   - If the cache is updating, it returns a 202 status code asking the client to try again later.
+3. The cache is updated either:
+   - Automatically once a day by the cron thread.
+   - On-demand when triggered by a client request if the cache is stale.
+4. The application uses a locking mechanism to ensure only one instance updates the cache at a time.
+5. Cached data is stored in both compressed and uncompressed formats to serve clients efficiently based on their capabilities.
+
+### Testing Goals
+
+Our testing strategy aims to ensure the reliability, performance, and correctness of the application. Key testing goals include:
+
+1. Verifying the correct functioning of the caching mechanism, including updates and serving cached data.
+2. Ensuring proper handling of concurrent requests and cache updates.
+3. Testing the application's behavior under various Redis states (connected, disconnected, reconnecting).
+4. Validating the correct implementation of HTTP caching headers and conditional responses.
+5. Assessing the performance of the application under load.
+6. Verifying the correct functioning of the logging system across all threads.
+7. Testing the health check endpoint for accuracy in reflecting the application's state.
+
+### Known Issues and Future Improvements
+
+While the application is functional, there are several areas identified for improvement:
+
+1. Enhance logging functionality to work consistently across all threads.
+2. Improve health checks to provide more detailed information about the application's state.
+3. Refine error handling, particularly for Redis connection issues.
+4. Implement more granular health check endpoints to distinguish between different types of failures.
+5. Improve the resilience of Redis subscriptions to handle disconnections and reconnections gracefully.
+
+These improvements will be addressed in future updates to enhance the reliability and maintainability of the application.
+
+## Development Environment
 
 In development, you can see the live service here (and test its performance):
 
@@ -18,7 +67,7 @@ In development, you can see the live service here (and test its performance):
 
 This dev service is hosted on a Cable modem, on my home network, and its backend cache is on the other side of a (slow-ish) Wi-Fi link.
 
-### Development Phases
+## Development Phases
 
 1. **Ruby Proof-of-Concept**: Initially, we're implementing this as a single-class proof-of-concept in pure Ruby with native extensions (gems, some parts written in C).
 
