@@ -63,23 +63,37 @@ class MyAppTest < Minitest::Test
   end
 
   def test_healthz_endpoint
+    mock_state_manager = Minitest::Mock.new
+    mock_state_manager.expect :health_check, {
+      cache_status: :ready,
+      redis_status: :connected,
+      last_cache_update: Time.now,
+      error_count: 0
+    }
+
+    MyApp.settings.stubs(:state_manager).returns(mock_state_manager)
+
     get '/healthz'
     assert_equal 200, last_response.status
     health_status = JSON.parse(last_response.body)
-    assert_includes health_status.keys, 'cache_status'
-    assert_includes health_status.keys, 'redis_status'
+    assert_equal 'ready', health_status['cache_status']
+    assert_equal 'connected', health_status['redis_status']
     assert_includes health_status.keys, 'last_cache_update'
-    assert_includes health_status.keys, 'error_count'
+    assert_equal 0, health_status['error_count']
+
+    mock_state_manager.verify
   end
 
   def test_healthz_endpoint_with_errors
     MyApp.settings.state_manager.update_cache_status(:error)
     MyApp.settings.state_manager.update_redis_status(:disconnected)
+    MyApp.settings.state_manager.increment_error_count
     get '/healthz'
     assert_equal 503, last_response.status
     health_status = JSON.parse(last_response.body)
     assert_equal 'error', health_status['cache_status']
     assert_equal 'disconnected', health_status['redis_status']
+    assert_equal 1, health_status['error_count']
   end
 
   def test_cron_thread_updates_cache
