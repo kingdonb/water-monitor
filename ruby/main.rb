@@ -176,14 +176,20 @@ class MyApp < Sinatra::Base
   end
 
   def handle_data_request
-    if self.class.cache_ready?
+    health_status = settings.state_manager.health_check
+    if health_status[:redis_status] != :connected
+      status 503
+      body "Service temporarily unavailable due to database connection issues."
+    elsif self.class.cache_ready?
       settings.state_manager.update_cache_status(:ready)
       serve_cached_data
     else
       settings.state_manager.update_cache_status(:updating)
       request_cache_update
-      log_request(request: request, response: response, data_sent: false, compressed: false)
+      status 202
+      body "Cache is updating, please try again later."
     end
+    log_request(request: request, response: response, data_sent: false, compressed: false)
   rescue => e
     settings.state_manager.increment_error_count
     handle_data_error(e)
@@ -332,6 +338,7 @@ class MyApp < Sinatra::Base
       self.redis_pool = ConnectionPool.new(size: 5, timeout: 5) do
         redis = Redis.new(url: redis_url)
         settings.state_manager.update_redis_status(:connected)
+        info("Successfully connected to Redis")
         redis
       end
       self.lock_key = "update_lock"
@@ -340,10 +347,35 @@ class MyApp < Sinatra::Base
       self.lock_mutex = Mutex.new
       debu("Redis connection pool initialized")
       @app_initialized = true
-    rescue Redis::CannotConnectError => e
+      start_redis_health_check
+    rescue Redis::CannotConnectError, SocketError => e
       settings.state_manager.update_redis_status(:disconnected)
       erro("Failed to connect to Redis: #{e.message}")
-      exit(1)
+      erro("Application will start, but data serving will be unavailable")
+      @app_initialized = true  # Still mark as initialized to prevent repeated attempts
+      start_redis_health_check  # Start health check to attempt reconnection
+    end
+  end
+
+  def self.start_redis_health_check
+    Thread.new do
+      loop do
+        begin
+          if redis_pool.nil?
+            initialize_app(ENV['REDIS_URL'])
+          else
+            with_redis { |redis| redis.ping }
+            settings.state_manager.update_redis_status(:connected)
+          end
+        rescue Redis::BaseConnectionError, SocketError => e
+          settings.state_manager.update_redis_status(:disconnected)
+          erro("Redis health check failed: #{e.message}")
+        rescue => e
+          settings.state_manager.update_redis_status(:error)
+          erro("Unexpected error in Redis health check: #{e.message}")
+        end
+        sleep 10 # Check every 10 seconds
+      end
     end
   end
 
@@ -389,24 +421,16 @@ class MyApp < Sinatra::Base
         redis = Redis.new # New connection for this thread
         redis.subscribe("please_update_now") do |on|
           on.message do |channel, message|
-            debu("Received message on please_update_now: #{message}")
-            if message == "true"
-              if acquire_lock
-                debu("Lock acquired in listener thread, updating cache")
-                update_cache
-              else
-                debu("Failed to acquire lock in listener thread")
-              end
-            else
-              debu("Unexpected message: #{message}")
-            end
+            on_message(channel, message)
           end
         end
-      rescue Redis::BaseConnectionError => e
+      rescue Redis::BaseConnectionError, EOFError => e
         erro("Redis connection error in listener thread: #{e.message}")
+        settings.state_manager.update_redis_status(:disconnected)
       rescue => e
         erro("Failed to subscribe to Redis channel: #{e.message}")
         erro(e.backtrace.join("\n"))
+        settings.state_manager.update_redis_status(:error)
       ensure
         redis.close if redis
       end

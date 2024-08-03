@@ -14,6 +14,8 @@ class MyAppTest < Minitest::Test
   def setup
     MyApp.initialize_app
     MyApp.redis_pool = ConnectionPool.new(size: 5, timeout: 5) { MockRedis.new }
+    MyApp.settings.state_manager = StateManager.new
+    MyApp.settings.state_manager.update_redis_status(:connected)
   end
 
   def test_data_endpoint_when_cache_ready
@@ -22,6 +24,7 @@ class MyAppTest < Minitest::Test
     MyApp.stubs(:in_memory_compressed_data).returns(compressed_data)
     MyApp.stubs(:in_memory_etag).returns('etag123')
     MyApp.stubs(:in_memory_last_modified).returns(Time.now.httpdate)
+    MyApp.settings.state_manager.update_cache_status(:ready)
 
     # Test with a client that accepts gzip
     header 'Accept-Encoding', 'gzip'
@@ -40,6 +43,7 @@ class MyAppTest < Minitest::Test
 
   def test_data_endpoint_when_cache_not_ready
     MyApp.stubs(:cache_ready?).returns(false)
+    MyApp.settings.state_manager.update_cache_status(:updating)
 
     get '/data'
     assert_equal 202, last_response.status
