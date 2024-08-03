@@ -18,6 +18,10 @@ class MyAppTest < Minitest::Test
     MyApp.settings.state_manager.update_redis_status(:connected)
   end
 
+  def self.log_message(level, message)
+    MyApp.send(level, message)
+  end
+
   def test_data_endpoint_when_cache_ready
     compressed_data = Zlib::Deflate.deflate('{"test":"data"}')
     MyApp.stubs(:cache_ready?).returns(true)
@@ -129,6 +133,29 @@ class MyAppTest < Minitest::Test
 
     # Reset the cron interval
     MyApp.cron_interval = nil
+  end
+
+  def test_log_level_consistency
+    original_stdout = $stdout
+    $stdout = StringIO.new
+
+    MyApp.set_log_level(:debu)
+
+    # Start a new thread that logs a message
+    thread = Thread.new do
+      MyAppTest.log_message(:debu, "Test message from thread")
+    end
+    thread.join
+
+    # Log a message from the main thread
+    MyAppTest.log_message(:debu, "Test message from main")
+
+    output = $stdout.string
+    $stdout = original_stdout
+
+    assert_includes output, "[DEBUG] Test message from thread"
+    assert_includes output, "[DEBUG] Test message from main"
+    refute_includes output, "[DEBU]"
   end
 end
 

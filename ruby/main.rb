@@ -173,6 +173,7 @@ class MyApp < Sinatra::Base
   configure do
     set :environment, ENV['RACK_ENV'] || 'development'
     set :state_manager, StateManager.new
+    set_log_level(ENV['LOG_LEVEL'] || Loggable::DEFAULT_LOG_LEVEL)
   end
 
   def handle_data_request
@@ -333,6 +334,7 @@ class MyApp < Sinatra::Base
   end
 
   def self.initialize_app(redis_url = nil)
+    set_log_level(ENV['LOG_LEVEL']) if ENV['LOG_LEVEL']
     return if @app_initialized
     begin
       self.redis_pool = ConnectionPool.new(size: 5, timeout: 5) do
@@ -508,7 +510,7 @@ class MyApp < Sinatra::Base
 end
 
 # Set the log level for MyApp
-MyApp.set_log_level(ENV['LOG_LEVEL'])
+MyApp.set_log_level(ENV['LOG_LEVEL'] || Loggable::DEFAULT_LOG_LEVEL)
 
 # Initialize the app
 MyApp.initialize_app(ENV['REDIS_URL'])
