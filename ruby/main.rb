@@ -7,6 +7,7 @@ require 'concurrent'
 require 'digest/md5'
 require 'connection_pool'
 require 'zlib'
+require_relative 'state_manager'
 
 COMPRESSION_LEVEL = 1  # You can adjust this value as needed
 
@@ -171,16 +172,27 @@ class MyApp < Sinatra::Base
 
   configure do
     set :environment, ENV['RACK_ENV'] || 'development'
+    set :state_manager, StateManager.new
+    set_log_level(ENV['LOG_LEVEL'] ? ENV['LOG_LEVEL'].to_sym : Loggable::DEFAULT_LOG_LEVEL)
   end
 
   def handle_data_request
-    if self.class.cache_ready?
+    health_status = settings.state_manager.health_check
+    if health_status[:redis_status] != :connected
+      status 503
+      body "Service temporarily unavailable due to database connection issues."
+    elsif self.class.cache_ready?
+      settings.state_manager.update_cache_status(:ready)
       serve_cached_data
     else
+      settings.state_manager.update_cache_status(:updating)
       request_cache_update
-      log_request(request: request, response: response, data_sent: false, compressed: false)
+      status 202
+      body "Cache is updating, please try again later."
     end
+    log_request(request: request, response: response, data_sent: false, compressed: false)
   rescue => e
+    settings.state_manager.increment_error_count
     handle_data_error(e)
   end
 
@@ -322,18 +334,50 @@ class MyApp < Sinatra::Base
   end
 
   def self.initialize_app(redis_url = nil)
+    set_log_level(ENV['LOG_LEVEL']) if ENV['LOG_LEVEL']
     return if @app_initialized
     begin
-      self.redis_pool = ConnectionPool.new(size: 5, timeout: 5) { Redis.new(url: redis_url) }
+      self.redis_pool = ConnectionPool.new(size: 5, timeout: 5) do
+        redis = Redis.new(url: redis_url)
+        settings.state_manager.update_redis_status(:connected)
+        info("Successfully connected to Redis")
+        redis
+      end
       self.lock_key = "update_lock"
       self.cache_key = "cached_data"
       self.lock_cv = ConditionVariable.new
       self.lock_mutex = Mutex.new
       debu("Redis connection pool initialized")
       @app_initialized = true
-    rescue Redis::CannotConnectError => e
+      start_redis_health_check
+    rescue Redis::CannotConnectError, SocketError => e
+      settings.state_manager.update_redis_status(:disconnected)
       erro("Failed to connect to Redis: #{e.message}")
-      exit(1)
+      erro("Application will start, but data serving will be unavailable")
+      @app_initialized = true  # Still mark as initialized to prevent repeated attempts
+      start_redis_health_check  # Start health check to attempt reconnection
+    end
+  end
+
+  def self.start_redis_health_check
+    Thread.new do
+      loop do
+        begin
+          if redis_pool.nil?
+            initialize_app(ENV['REDIS_URL'])
+          else
+            with_redis { |redis| redis.ping }
+            settings.state_manager.update_redis_status(:connected)
+          end
+        rescue Redis::BaseConnectionError, SocketError => e
+          settings.state_manager.update_redis_status(:disconnected)
+          erro("Redis health check failed: #{e.message}")
+        rescue => e
+          settings.state_manager.update_redis_status(:error)
+          erro("Unexpected error in Redis health check: #{e.message}")
+        end
+        sleep 10 # Check every 10 seconds
+      end
     end
   end
 
@@ -349,9 +393,10 @@ class MyApp < Sinatra::Base
   set :bind, '0.0.0.0'
 
   get '/healthz' do
-    # test redis connection (later)
-    status 200
-    body "Health OK"
+    health_status = settings.state_manager.health_check
+    status health_status[:cache_status] == :ready && health_status[:redis_status] == :connected ? 200 : 503
+    content_type :json
+    body health_status.to_json
     log_request(request: request, response: response, data_sent: true, compressed: false, level: :debug)
   end
 
@@ -372,55 +417,48 @@ class MyApp < Sinatra::Base
       return
     end
 
+    current_log_level = log_level
+
+    @cron_thread = Thread.new do
+      set_log_level(current_log_level)
+      debu("Starting cron_thread")
+      redis = Redis.new
+      loop do
+        sleep cron_interval
+        if cache_ready?
+          debu("Cache is ready, no update needed")
+        elsif acquire_lock
+          debu("Lock acquired in cron thread, updating cache")
+          update_cache
+        else
+          debu("Failed to acquire lock in cron thread")
+        end
+        debu("cron_thread woke up")
+      end
+    ensure
+      redis.close if redis
+    end
+
     @listener_thread = Thread.new do
+      set_log_level(current_log_level)
       debu("Starting listener_thread")
       begin
         redis = Redis.new # New connection for this thread
         redis.subscribe("please_update_now") do |on|
           on.message do |channel, message|
-            debu("Received message on please_update_now: #{message}")
-            if message == "true"
-              if acquire_lock
-                debu("Lock acquired in listener thread, updating cache")
-                update_cache
-              else
-                debu("Failed to acquire lock in listener thread")
-              end
-            else
-              debu("Unexpected message: #{message}")
-            end
+            on_message(channel, message)
           end
         end
-      rescue Redis::BaseConnectionError => e
+      rescue Redis::BaseConnectionError, EOFError => e
         erro("Redis connection error in listener thread: #{e.message}")
+        settings.state_manager.update_redis_status(:disconnected)
       rescue => e
         erro("Failed to subscribe to Redis channel: #{e.message}")
         erro(e.backtrace.join("\n"))
+        settings.state_manager.update_redis_status(:error)
       ensure
         redis.close if redis
       end
-    end
-
-    @cron_thread = Thread.new do
-      debu("Starting cron_thread")
-      redis = Redis.new # New connection for this thread
-      loop do
-        if !cache_ready?
-          debu("Cache is not ready or stale")
-          if acquire_lock
-            debu("Lock acquired in cron thread, updating cache")
-            update_cache
-          else
-            debu("Failed to acquire lock in cron thread")
-          end
-        else
-          debu("Cache is ready, no update needed")
-        end
-        sleep @cron_interval || CACHE_DURATION # Use configurable interval or default to 24 hours
-        debu("cron_thread woke up")
-      end
-    ensure
-      redis.close if redis
     end
 
     @threads_started = true
@@ -473,7 +511,7 @@ class MyApp < Sinatra::Base
 end
 
 # Set the log level for MyApp
-MyApp.set_log_level(ENV['LOG_LEVEL'])
+MyApp.set_log_level(ENV['LOG_LEVEL'] ? ENV['LOG_LEVEL'].to_sym : Loggable::DEFAULT_LOG_LEVEL)
 
 # Initialize the app
 MyApp.initialize_app(ENV['REDIS_URL'])

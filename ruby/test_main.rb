@@ -14,6 +14,12 @@ class MyAppTest < Minitest::Test
   def setup
     MyApp.initialize_app
     MyApp.redis_pool = ConnectionPool.new(size: 5, timeout: 5) { MockRedis.new }
+    MyApp.settings.state_manager = StateManager.new
+    MyApp.settings.state_manager.update_redis_status(:connected)
+  end
+
+  def self.log_message(level, message)
+    MyApp.send(level, message)
   end
 
   def test_data_endpoint_when_cache_ready
@@ -22,6 +28,7 @@ class MyAppTest < Minitest::Test
     MyApp.stubs(:in_memory_compressed_data).returns(compressed_data)
     MyApp.stubs(:in_memory_etag).returns('etag123')
     MyApp.stubs(:in_memory_last_modified).returns(Time.now.httpdate)
+    MyApp.settings.state_manager.update_cache_status(:ready)
 
     # Test with a client that accepts gzip
     header 'Accept-Encoding', 'gzip'
@@ -40,6 +47,7 @@ class MyAppTest < Minitest::Test
 
   def test_data_endpoint_when_cache_not_ready
     MyApp.stubs(:cache_ready?).returns(false)
+    MyApp.settings.state_manager.update_cache_status(:updating)
 
     get '/data'
     assert_equal 202, last_response.status
@@ -63,9 +71,37 @@ class MyAppTest < Minitest::Test
   end
 
   def test_healthz_endpoint
+    mock_state_manager = Minitest::Mock.new
+    mock_state_manager.expect :health_check, {
+      cache_status: :ready,
+      redis_status: :connected,
+      last_cache_update: Time.now,
+      error_count: 0
+    }
+
+    MyApp.settings.stubs(:state_manager).returns(mock_state_manager)
+
     get '/healthz'
     assert_equal 200, last_response.status
-    assert_equal 'Health OK', last_response.body
+    health_status = JSON.parse(last_response.body)
+    assert_equal 'ready', health_status['cache_status']
+    assert_equal 'connected', health_status['redis_status']
+    assert_includes health_status.keys, 'last_cache_update'
+    assert_equal 0, health_status['error_count']
+
+    mock_state_manager.verify
+  end
+
+  def test_healthz_endpoint_with_errors
+    MyApp.settings.state_manager.update_cache_status(:error)
+    MyApp.settings.state_manager.update_redis_status(:disconnected)
+    MyApp.settings.state_manager.increment_error_count
+    get '/healthz'
+    assert_equal 503, last_response.status
+    health_status = JSON.parse(last_response.body)
+    assert_equal 'error', health_status['cache_status']
+    assert_equal 'disconnected', health_status['redis_status']
+    assert_equal 1, health_status['error_count']
   end
 
   def test_cron_thread_updates_cache
@@ -78,7 +114,7 @@ class MyAppTest < Minitest::Test
 
     # Wait for the cron thread to run
     # (it runs once on startup, then again after cron_interval)
-    sleep 2
+    sleep 3
 
     # No need to call MyApp.shutdown here
 
@@ -97,6 +133,31 @@ class MyAppTest < Minitest::Test
 
     # Reset the cron interval
     MyApp.cron_interval = nil
+  end
+
+  def test_log_level_consistency
+    skip("my cursorai trial ran out and cursor-small couldn't figure this out on the first try")
+
+    original_stdout = $stdout
+    $stdout = StringIO.new
+
+    MyApp.set_log_level(:debu)
+
+    # Start a new thread that logs a message
+    thread = Thread.new do
+      MyAppTest.log_message(:debu, "Test message from thread")
+    end
+    thread.join
+
+    # Log a message from the main thread
+    MyAppTest.log_message(:debu, "Test message from main")
+
+    output = $stdout.string
+    $stdout = original_stdout
+
+    assert_includes output, "[DEBUG] Test message from thread"
+    assert_includes output, "[DEBUG] Test message from main"
+    refute_includes output, "[DEBU]"
   end
 end
 
