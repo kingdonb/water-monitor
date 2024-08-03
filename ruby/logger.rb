@@ -10,15 +10,20 @@ module Loggable
 
   module ClassMethods
     def set_log_level(level)
-      level = level.to_s[0..3].downcase.to_sym
+      level = case level
+              when Integer then LOG_LEVELS.key(level)
+              when String, Symbol then level.to_s[0..3].downcase.to_sym
+              else raise ArgumentError, "Invalid log level: #{level}"
+              end
       unless LOG_LEVELS.key?(level)
         raise ArgumentError, "Invalid log level: #{level}"
       end
+      Thread.current[:log_level] = LOG_LEVELS[level]
       @log_level = LOG_LEVELS[level]
     end
 
     def log_level
-      @log_level
+      Thread.current[:log_level] || @log_level
     end
   end
 
@@ -57,10 +62,11 @@ module Loggable
   end
 
   def current_log_level
-    if self.class.singleton_class.included_modules.include?(Loggable)
-      self.class.instance_variable_get(:@log_level) || LOG_LEVELS[DEFAULT_LOG_LEVEL]
-    else
-      self.class.ancestors.find { |a| a.instance_variable_defined?(:@log_level) }&.instance_variable_get(:@log_level) || LOG_LEVELS[DEFAULT_LOG_LEVEL]
-    end
+    Thread.current[:log_level] ||
+      if self.class.singleton_class.included_modules.include?(Loggable)
+        self.class.instance_variable_get(:@log_level) || LOG_LEVELS[DEFAULT_LOG_LEVEL]
+      else
+        self.class.ancestors.find { |a| a.instance_variable_defined?(:@log_level) }&.instance_variable_get(:@log_level) || LOG_LEVELS[DEFAULT_LOG_LEVEL]
+      end
   end
 end

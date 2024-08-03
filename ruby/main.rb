@@ -173,7 +173,7 @@ class MyApp < Sinatra::Base
   configure do
     set :environment, ENV['RACK_ENV'] || 'development'
     set :state_manager, StateManager.new
-    set_log_level(ENV['LOG_LEVEL'] || Loggable::DEFAULT_LOG_LEVEL)
+    set_log_level(ENV['LOG_LEVEL'] ? ENV['LOG_LEVEL'].to_sym : Loggable::DEFAULT_LOG_LEVEL)
   end
 
   def handle_data_request
@@ -417,7 +417,30 @@ class MyApp < Sinatra::Base
       return
     end
 
+    current_log_level = log_level
+
+    @cron_thread = Thread.new do
+      set_log_level(current_log_level)
+      debu("Starting cron_thread")
+      redis = Redis.new
+      loop do
+        sleep cron_interval
+        if cache_ready?
+          debu("Cache is ready, no update needed")
+        elsif acquire_lock
+          debu("Lock acquired in cron thread, updating cache")
+          update_cache
+        else
+          debu("Failed to acquire lock in cron thread")
+        end
+        debu("cron_thread woke up")
+      end
+    ensure
+      redis.close if redis
+    end
+
     @listener_thread = Thread.new do
+      set_log_level(current_log_level)
       debu("Starting listener_thread")
       begin
         redis = Redis.new # New connection for this thread
@@ -436,28 +459,6 @@ class MyApp < Sinatra::Base
       ensure
         redis.close if redis
       end
-    end
-
-    @cron_thread = Thread.new do
-      debu("Starting cron_thread")
-      redis = Redis.new # New connection for this thread
-      loop do
-        if !cache_ready?
-          debu("Cache is not ready or stale")
-          if acquire_lock
-            debu("Lock acquired in cron thread, updating cache")
-            update_cache
-          else
-            debu("Failed to acquire lock in cron thread")
-          end
-        else
-          debu("Cache is ready, no update needed")
-        end
-        sleep @cron_interval || CACHE_DURATION # Use configurable interval or default to 24 hours
-        debu("cron_thread woke up")
-      end
-    ensure
-      redis.close if redis
     end
 
     @threads_started = true
@@ -510,7 +511,7 @@ class MyApp < Sinatra::Base
 end
 
 # Set the log level for MyApp
-MyApp.set_log_level(ENV['LOG_LEVEL'] || Loggable::DEFAULT_LOG_LEVEL)
+MyApp.set_log_level(ENV['LOG_LEVEL'] ? ENV['LOG_LEVEL'].to_sym : Loggable::DEFAULT_LOG_LEVEL)
 
 # Initialize the app
 MyApp.initialize_app(ENV['REDIS_URL'])
