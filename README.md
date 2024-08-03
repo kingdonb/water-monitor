@@ -51,11 +51,12 @@ Our testing strategy aims to ensure the reliability, performance, and correctnes
 
 While the application is functional, there are several areas identified for improvement:
 
-1. ~~Enhance logging functionality to work consistently across all threads.~~
-2. ~~Improve health checks to provide more detailed information about the application's state.~~
-3. ~~Refine error handling, particularly for Redis connection issues.~~
-4. ~~Implement more granular health check endpoints to distinguish between different types of failures.~~
-5. ~~Improve the resilience of Redis subscriptions to handle disconnections and reconnections gracefully.~~
+1. Enhance logging functionality to work consistently across all threads.
+2. Ensure that health checks can pass prior to when a first request is received
+1. ~~Improve health checks to provide more detailed information about the application's state.~~
+1. ~~Refine error handling, particularly for Redis connection issues.~~
+1. ~~Implement more granular health check endpoints to distinguish between different types of failures.~~
+1. ~~Improve the resilience of Redis subscriptions to handle disconnections and reconnections gracefully.~~
 
 These improvements will be addressed in future updates to enhance the reliability and maintainability of the application.
 

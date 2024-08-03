@@ -181,6 +181,7 @@ class MyApp < Sinatra::Base
     if health_status[:redis_status] != :connected
       status 503
       body "Service temporarily unavailable due to database connection issues."
+      log_request(request: request, response: response, data_sent: false, compressed: false)
     elsif self.class.cache_ready?
       settings.state_manager.update_cache_status(:ready)
       serve_cached_data
@@ -190,7 +191,7 @@ class MyApp < Sinatra::Base
       status 202
       body "Cache is updating, please try again later."
     end
-    log_request(request: request, response: response, data_sent: false, compressed: false)
+    # log_request(request: request, response: response, data_sent: false, compressed: false)
   rescue => e
     settings.state_manager.increment_error_count
     handle_data_error(e)
