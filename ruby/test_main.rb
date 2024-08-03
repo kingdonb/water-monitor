@@ -65,7 +65,21 @@ class MyAppTest < Minitest::Test
   def test_healthz_endpoint
     get '/healthz'
     assert_equal 200, last_response.status
-    assert_equal 'Health OK', last_response.body
+    health_status = JSON.parse(last_response.body)
+    assert_includes health_status.keys, 'cache_status'
+    assert_includes health_status.keys, 'redis_status'
+    assert_includes health_status.keys, 'last_cache_update'
+    assert_includes health_status.keys, 'error_count'
+  end
+
+  def test_healthz_endpoint_with_errors
+    MyApp.settings.state_manager.update_cache_status(:error)
+    MyApp.settings.state_manager.update_redis_status(:disconnected)
+    get '/healthz'
+    assert_equal 503, last_response.status
+    health_status = JSON.parse(last_response.body)
+    assert_equal 'error', health_status['cache_status']
+    assert_equal 'disconnected', health_status['redis_status']
   end
 
   def test_cron_thread_updates_cache

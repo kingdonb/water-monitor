@@ -7,6 +7,7 @@ require 'concurrent'
 require 'digest/md5'
 require 'connection_pool'
 require 'zlib'
+require_relative 'state_manager'
 
 COMPRESSION_LEVEL = 1  # You can adjust this value as needed
 
@@ -171,16 +172,20 @@ class MyApp < Sinatra::Base
 
   configure do
     set :environment, ENV['RACK_ENV'] || 'development'
+    set :state_manager, StateManager.new
   end
 
   def handle_data_request
     if self.class.cache_ready?
+      settings.state_manager.update_cache_status(:ready)
       serve_cached_data
     else
+      settings.state_manager.update_cache_status(:updating)
       request_cache_update
       log_request(request: request, response: response, data_sent: false, compressed: false)
     end
   rescue => e
+    settings.state_manager.increment_error_count
     handle_data_error(e)
   end
 
@@ -324,7 +329,11 @@ class MyApp < Sinatra::Base
   def self.initialize_app(redis_url = nil)
     return if @app_initialized
     begin
-      self.redis_pool = ConnectionPool.new(size: 5, timeout: 5) { Redis.new(url: redis_url) }
+      self.redis_pool = ConnectionPool.new(size: 5, timeout: 5) do
+        redis = Redis.new(url: redis_url)
+        settings.state_manager.update_redis_status(:connected)
+        redis
+      end
       self.lock_key = "update_lock"
       self.cache_key = "cached_data"
       self.lock_cv = ConditionVariable.new
@@ -332,6 +341,7 @@ class MyApp < Sinatra::Base
       debu("Redis connection pool initialized")
       @app_initialized = true
     rescue Redis::CannotConnectError => e
+      settings.state_manager.update_redis_status(:disconnected)
       erro("Failed to connect to Redis: #{e.message}")
       exit(1)
     end
@@ -349,9 +359,10 @@ class MyApp < Sinatra::Base
   set :bind, '0.0.0.0'
 
   get '/healthz' do
-    # test redis connection (later)
-    status 200
-    body "Health OK"
+    health_status = settings.state_manager.health_check
+    status health_status[:cache_status] == :ready && health_status[:redis_status] == :connected ? 200 : 503
+    content_type :json
+    body health_status.to_json
     log_request(request: request, response: response, data_sent: true, compressed: false, level: :debug)
   end
 
