@@ -477,9 +477,9 @@ class MyApp < Sinatra::Base
   def self.on_message(channel, message)
     debu("Received message on #{channel}: #{message}")
     if channel == "please_update_now" && message == "true"
-      if self.class.acquire_lock
+      if self.acquire_lock
         debu("Lock acquired in listener thread, updating cache")
-        self.class.update_cache
+        self.update_cache
       else
         debu("Failed to acquire lock in listener thread")
       end
