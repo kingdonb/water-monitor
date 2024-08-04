@@ -127,6 +127,9 @@ module CacheHelpers
       @in_memory_etag = etag
       @in_memory_last_modified = current_time
 
+      # Update cache status to ready after successful update
+      settings.state_manager.update_cache_status(:ready)
+
       debu("Cache updated, new value size: #{json_data.bytesize} bytes, compressed size: #{compressed_data.bytesize} bytes")
       release_lock
       debu("Cache updated and lock released")
@@ -282,6 +285,10 @@ class MyApp < Sinatra::Base
   def request_cache_update
     debu("Cache not ready or contains test data, publishing please_update_now message")
     with_redis { |redis| redis.publish("please_update_now", "true") }
+
+    # Update cache status to updating while the cache is being warmed
+    settings.state_manager.update_cache_status(:updating)
+
     status 202
     body "Cache is updating, please try again later."
   rescue => e
@@ -327,6 +334,9 @@ class MyApp < Sinatra::Base
       @in_memory_compressed_data = compressed_data
       @in_memory_etag = etag
       @in_memory_last_modified = current_time
+
+      # Update cache status to ready after successful update
+      settings.state_manager.update_cache_status(:ready)
 
       debu("Cache updated, new value size: #{json_data.bytesize} bytes, compressed size: #{compressed_data.bytesize} bytes")
       release_lock
@@ -427,6 +437,7 @@ class MyApp < Sinatra::Base
       loop do
         if cache_ready?
           debu("Cache is ready, no update needed in cron_thread")
+      settings.state_manager.update_cache_status(:ready)
         elsif acquire_lock
           debu("Lock acquired in cron_thread, updating cache")
           update_cache
