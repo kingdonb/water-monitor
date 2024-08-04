@@ -474,7 +474,7 @@ class MyApp < Sinatra::Base
     exit
   end
 
-  def on_message(channel, message)
+  def self.on_message(channel, message)
     debu("Received message on #{channel}: #{message}")
     if channel == "please_update_now" && message == "true"
       if self.class.acquire_lock
