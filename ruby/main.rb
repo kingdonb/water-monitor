@@ -425,15 +425,15 @@ class MyApp < Sinatra::Base
       debu("Starting cron_thread")
       redis = Redis.new
       loop do
-        sleep cron_interval
         if cache_ready?
-          debu("Cache is ready, no update needed")
+          debu("Cache is ready, no update needed in cron_thread")
         elsif acquire_lock
-          debu("Lock acquired in cron thread, updating cache")
+          debu("Lock acquired in cron_thread, updating cache")
           update_cache
         else
-          debu("Failed to acquire lock in cron thread")
+          debu("Failed to acquire lock in cron_thread")
         end
+        sleep cron_interval
         debu("cron_thread woke up")
       end
     ensure
