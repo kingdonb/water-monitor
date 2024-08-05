@@ -1,4 +1,5 @@
 require 'concurrent'
+require_relative 'loggable'
 
 class StateManager
   include Loggable
