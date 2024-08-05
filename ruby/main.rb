@@ -304,44 +304,6 @@ class MyApp < Sinatra::Base
     attr_accessor :last_redis_check
     attr_accessor :app_initialized
     attr_accessor :cron_interval
-
-    def update_cache
-      debu("Updating cache")
-      data = fetch_data
-      if data.nil? || data.empty?
-        erro("Error: Fetched data is nil or empty")
-        return
-      end
-      json_data = data.to_json
-      compressed_data = StringIO.new.tap do |io|
-        gz = Zlib::GzipWriter.new(io, COMPRESSION_LEVEL)
-        gz.write(json_data)
-        gz.close
-      end.string
-      etag = Digest::MD5.hexdigest(json_data)
-      current_time = Time.now.httpdate
-
-      with_redis do |redis|
-        if redis.respond_to?(:multi)
-          redis.multi do |multi|
-            set_cache_data(multi, json_data, compressed_data, etag, current_time)
-          end
-        else
-          set_cache_data(redis, json_data, compressed_data, etag, current_time)
-        end
-      end
-
-      @in_memory_compressed_data = compressed_data
-      @in_memory_etag = etag
-      @in_memory_last_modified = current_time
-
-      # Update cache status to ready after successful update
-      settings.state_manager.update_cache_status(:ready)
-
-      debu("Cache updated, new value size: #{json_data.bytesize} bytes, compressed size: #{compressed_data.bytesize} bytes")
-      release_lock
-      debu("Cache updated and lock released")
-    end
   end
 
   def self.initialize_app(redis_url = nil)
