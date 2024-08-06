@@ -1,5 +1,7 @@
 require_relative 'loggable'
 
+require 'net/http'
+
 COMPRESSION_LEVEL = 1  # You can adjust this value as needed
 
 module CacheHelpers

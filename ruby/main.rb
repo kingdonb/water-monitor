@@ -1,7 +1,6 @@
 require_relative 'modules/my_app'
 
 #require 'redis'
-#require 'net/http'
 #require 'json'
 #require 'concurrent'
 #require 'digest/md5'
