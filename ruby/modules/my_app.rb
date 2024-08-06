@@ -234,7 +234,7 @@ class MyApp < Sinatra::Base
       loop do
         if cache_ready?
           debu("Cache is ready, no update needed in cron_thread")
-      settings.state_manager.update_cache_status(:ready)
+          settings.state_manager.update_cache_status(:ready)
         elsif acquire_lock
           debu("Lock acquired in cron_thread, updating cache")
           update_cache
