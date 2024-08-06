@@ -358,7 +358,6 @@ class MyApp < Sinatra::Base
         else
           debu("Failed to acquire lock in cron15_thread")
         end
-        # binding.pry
         sleep cron15_interval
         debu("cron15_thread woke up")
       end
@@ -372,7 +371,6 @@ class MyApp < Sinatra::Base
       begin
         redis = Redis.new # New connection for this thread
         redis.psubscribe("please_update*_now") do |on|
-          # binding.pry
           on.pmessage do |_pattern, channel, message|
             on_message(channel, message)
           end
@@ -403,7 +401,6 @@ class MyApp < Sinatra::Base
   end
 
   def self.on_message(channel, message)
-    # binding.pry
     debu("Received message on #{channel}: #{message}")
     if channel == "please_update_now" && message == "true"
       if self.acquire_lock

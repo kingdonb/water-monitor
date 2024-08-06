@@ -102,7 +102,6 @@ module CacheHelpers
                     @in_memory_etag15.nil? || @in_memory_etag15.empty?
 
       last_modified_time = Time.parse(@in_memory_last15_modified)
-      # binding.pry
       if current_time - last_modified_time > CACHE_2_DURATION # 15 minutes
         debu("Cache15 not ready: data15 is stale")
         return false
@@ -212,7 +211,6 @@ module CacheHelpers
 
     def set_cache_data15(redis, json_data, compressed_data, etag, current_time)
       expiry_time = CACHE_2_DURATION - 30
-      # binding.pry
       redis.set(cache_key, json_data)
       redis.set("#{cache_key}15_compressed", compressed_data)
       redis.set("#{cache_key}15_last_modified", current_time)
