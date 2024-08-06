@@ -45,12 +45,12 @@ class MyApp < Sinatra::Base
       status 503
       body "Service temporarily unavailable due to database connection issues."
       log_request(request: request, response: response, data_sent: false, compressed: false)
-    elsif self.class.cache_ready?
-      settings.state_manager.update_cache_status(:ready)
-      serve_cached_data
+    elsif self.class.cache15_ready?
+      settings.state_manager.update_cache15_status(:ready)
+      serve_cached_data15
     else
-      settings.state_manager.update_cache_status(:updating)
-      request_cache_update
+      settings.state_manager.update_cache15_status(:updating)
+      request_cache15_update
       status 202
       body "Cache is updating, please try again later."
     end
@@ -90,6 +90,20 @@ class MyApp < Sinatra::Base
     handle_serve_error(e)
   end
 
+  def serve_cached_data15
+    set_response15_headers
+
+    if client_cache15_valid?(self.class.in_memory_etag15)
+      status 304
+      log_request(request: request, response: response, data_sent: false, compressed: false)
+      return
+    end
+
+    serve_appropriate_response15
+  rescue StandardError => e
+    handle_serve_error(e)
+  end
+
   private
 
   def set_response_headers
@@ -103,8 +117,8 @@ class MyApp < Sinatra::Base
 
   def set_response15_headers
     content_type :json
-    headers['ETag'] = self.class.in_memory_etag
-    headers['Last-Modified'] = self.class.in_memory_last_modified
+    headers['ETag'] = self.class.in_memory_etag15
+    headers['Last-Modified'] = self.class.in_memory_last15_modified
     headers['Cache-Control'] = CACHE_15_CONTROL_HEADER
     headers['Access-Control-Allow-Origin'] = '*'
     headers['Vary'] = 'Accept-Encoding'
@@ -118,6 +132,14 @@ class MyApp < Sinatra::Base
     end
   end
 
+  def serve_appropriate_response15
+    if client_accepts_gzip?
+      serve_compressed_response15
+    else
+      serve_uncompressed_response15
+    end
+  end
+
   def client_accepts_gzip?
     (request.env['HTTP_ACCEPT_ENCODING'] || '').include?(GZIP_ENCODING)
   end
@@ -128,8 +150,19 @@ class MyApp < Sinatra::Base
     log_request(request: request, response: response, data_sent: true, compressed: true)
   end
 
+  def serve_compressed_response15
+    headers['Content-Encoding'] = GZIP_ENCODING
+    body self.class.in_memory_compressed_data15.to_s
+    log_request(request: request, response: response, data_sent: true, compressed: true)
+  end
+
   def serve_uncompressed_response
     body Zlib::Inflate.inflate(self.class.in_memory_compressed_data.to_s)
+    log_request(request: request, response: response, data_sent: true, compressed: false)
+  end
+
+  def serve_uncompressed_response15
+    body Zlib::Inflate.inflate(self.class.in_memory_compressed_data15.to_s)
     log_request(request: request, response: response, data_sent: true, compressed: false)
   end
 
@@ -147,6 +180,17 @@ class MyApp < Sinatra::Base
       true
     else
       debu("Cache miss: Client cache is stale or non-existent")
+      false
+    end
+  end
+
+  def client_cache15_valid?(etag)
+    client_etag = request.env['HTTP_IF_NONE_MATCH']
+    if client_etag && client_etag == etag
+      debu("Cache hit: Client cache15 is still valid, returning 304")
+      true
+    else
+      debu("Cache miss: Client cache15 is stale or non-existent")
       false
     end
   end
@@ -314,6 +358,7 @@ class MyApp < Sinatra::Base
         else
           debu("Failed to acquire lock in cron15_thread")
         end
+        # binding.pry
         sleep cron15_interval
         debu("cron15_thread woke up")
       end
@@ -326,8 +371,9 @@ class MyApp < Sinatra::Base
       debu("Starting listener_thread")
       begin
         redis = Redis.new # New connection for this thread
-        redis.subscribe("please_update_now") do |on|
-          on.message do |channel, message|
+        redis.psubscribe("please_update*_now") do |on|
+          # binding.pry
+          on.pmessage do |_pattern, channel, message|
             on_message(channel, message)
           end
         end
@@ -357,6 +403,7 @@ class MyApp < Sinatra::Base
   end
 
   def self.on_message(channel, message)
+    # binding.pry
     debu("Received message on #{channel}: #{message}")
     if channel == "please_update_now" && message == "true"
       if self.acquire_lock
