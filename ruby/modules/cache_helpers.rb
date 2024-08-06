@@ -12,7 +12,7 @@ module CacheHelpers
   CACHE_2_DURATION = 2 * 60 # 2 minutes cache duration
   LOCK_TIMEOUT = 15_000 # 15 seconds in milliseconds
   CACHE_CONTROL_HEADER = "public, max-age=#{CACHE_DURATION}, must-revalidate"
-  CACHE_15_CONTROL_HEADER = "public, max-age=#{CACHE_15_DURATION}, must-revalidate"
+  CACHE_15_CONTROL_HEADER = "public, max-age=#{CACHE_2_DURATION}, must-revalidate"
   GZIP_ENCODING = 'gzip'
 
   def self.included(base)
@@ -102,7 +102,8 @@ module CacheHelpers
                     @in_memory_etag15.nil? || @in_memory_etag15.empty?
 
       last_modified_time = Time.parse(@in_memory_last15_modified)
-      if current_time - last_modified_time > CACHE_15_DURATION # 15 minutes
+      # binding.pry
+      if current_time - last_modified_time > CACHE_2_DURATION # 15 minutes
         debu("Cache15 not ready: data15 is stale")
         return false
       end
@@ -210,15 +211,16 @@ module CacheHelpers
     end
 
     def set_cache_data15(redis, json_data, compressed_data, etag, current_time)
-      expiry_time = CACHE_DURATION - 30
+      expiry_time = CACHE_2_DURATION - 30
+      # binding.pry
       redis.set(cache_key, json_data)
-      redis.set("#{cache_key}_compressed", compressed_data)
-      redis.set("#{cache_key}_last_modified", current_time)
-      redis.set("#{cache_key}_etag", etag)
+      redis.set("#{cache_key}15_compressed", compressed_data)
+      redis.set("#{cache_key}15_last_modified", current_time)
+      redis.set("#{cache_key}15_etag", etag)
       redis.expire(cache_key, expiry_time) # Set TTL to 24 hours - 30s
-      redis.expire("#{cache_key}_compressed", expiry_time)
-      redis.expire("#{cache_key}_last_modified", expiry_time)
-      redis.expire("#{cache_key}_etag", expiry_time)
+      redis.expire("#{cache_key}15_compressed", expiry_time)
+      redis.expire("#{cache_key}15_last_modified", expiry_time)
+      redis.expire("#{cache_key}15_etag", expiry_time)
     end
 
     def release_lock

@@ -151,6 +151,21 @@ class MyApp < Sinatra::Base
     end
   end
 
+  def request_cache15_update
+    debu("Cache15 not ready or contains test data, publishing please_update15_now message")
+    with_redis { |redis| redis.publish("please_update15_now", "true") }
+
+    # Update cache status to updating while the cache is being warmed
+    settings.state_manager.update_cache15_status(:updating)
+
+    status 202
+    body "Cache15 is updating, please try again later."
+  rescue StandardError => e
+    erro("Error requesting cache15 update: #{e.message}")
+    status 202  # Keep the 202 status even if there's an error
+    body "Cache15 is updating, please try again later."
+  end
+
   def request_cache_update
     debu("Cache not ready or contains test data, publishing please_update_now message")
     with_redis { |redis| redis.publish("please_update_now", "true") }
@@ -175,6 +190,7 @@ class MyApp < Sinatra::Base
     attr_accessor :last_redis15_check
     attr_accessor :app_initialized
     attr_accessor :cron_interval
+    attr_accessor :cron15_interval
   end
 
   def self.initialize_app(redis_url = nil)
@@ -284,6 +300,27 @@ class MyApp < Sinatra::Base
       redis.close if redis
     end
 
+    @cron15_thread = Thread.new do
+      set_log_level(current_log_level)
+      debu("Starting cron15_thread")
+      redis = Redis.new
+      loop do
+        if cache15_ready?
+          debu("Cache is ready, no update needed in cron15_thread")
+          settings.state_manager.update_cache15_status(:ready)
+        elsif acquire_lock
+          debu("Lock acquired in cron15_thread, updating cache")
+          update_cache15
+        else
+          debu("Failed to acquire lock in cron15_thread")
+        end
+        sleep cron15_interval
+        debu("cron15_thread woke up")
+      end
+    ensure
+      redis.close if redis
+    end
+
     @listener_thread = Thread.new do
       set_log_level(current_log_level)
       debu("Starting listener_thread")
@@ -313,6 +350,7 @@ class MyApp < Sinatra::Base
   def self.shutdown
     debu("Shutting down background threads")
     @cron_thread.kill if @cron_thread
+    @cron15_thread.kill if @cron15_thread
     @listener_thread.kill if @listener_thread
     info("Gracefully shutting down...")
     exit
@@ -324,6 +362,13 @@ class MyApp < Sinatra::Base
       if self.acquire_lock
         debu("Lock acquired in listener thread, updating cache")
         self.update_cache
+      else
+        debu("Failed to acquire lock in listener thread")
+      end
+    elsif channel == "please_update15_now" && message == "true"
+      if self.acquire_lock
+        debu("Lock acquired in listener thread, updating cache15")
+        self.update_cache15
       else
         debu("Failed to acquire lock in listener thread")
       end
