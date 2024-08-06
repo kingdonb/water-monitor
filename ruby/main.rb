@@ -20,7 +20,10 @@ if __FILE__ == $0
   end
 
   # Ensure the server has time to start
-  sleep 1
+  sleep 0
+
+  # Tell the cron_thread how often it should fire
+  MyApp.cron_interval = CacheHelpers::CACHE_DURATION
 
   # Start background threads
   MyApp.start_threads
