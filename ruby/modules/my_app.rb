@@ -39,6 +39,31 @@ class MyApp < Sinatra::Base
     handle_data_request
   end
 
+  def handle_data15_request
+    health_status = settings.state_manager.health_check
+    if health_status[:redis_status] != :connected
+      status 503
+      body "Service temporarily unavailable due to database connection issues."
+      log_request(request: request, response: response, data_sent: false, compressed: false)
+    elsif self.class.cache_ready?
+      settings.state_manager.update_cache_status(:ready)
+      serve_cached_data
+    else
+      settings.state_manager.update_cache_status(:updating)
+      request_cache_update
+      status 202
+      body "Cache is updating, please try again later."
+    end
+    # log_request(request: request, response: response, data_sent: false, compressed: false)
+  rescue StandardError => e
+    settings.state_manager.increment_error_count
+    handle_data_error(e)
+  end
+
+  get '/data15' do
+    handle_data15_request
+  end
+
   get '/test' do
     'Test route'
   end
@@ -72,6 +97,15 @@ class MyApp < Sinatra::Base
     headers['ETag'] = self.class.in_memory_etag
     headers['Last-Modified'] = self.class.in_memory_last_modified
     headers['Cache-Control'] = CACHE_CONTROL_HEADER
+    headers['Access-Control-Allow-Origin'] = '*'
+    headers['Vary'] = 'Accept-Encoding'
+  end
+
+  def set_response15_headers
+    content_type :json
+    headers['ETag'] = self.class.in_memory_etag
+    headers['Last-Modified'] = self.class.in_memory_last_modified
+    headers['Cache-Control'] = CACHE_15_CONTROL_HEADER
     headers['Access-Control-Allow-Origin'] = '*'
     headers['Vary'] = 'Accept-Encoding'
   end
@@ -136,7 +170,9 @@ class MyApp < Sinatra::Base
     include Loggable
     attr_accessor :redis_pool, :lock_key, :cache_key, :lock_cv, :lock_mutex
     attr_accessor :in_memory_etag, :in_memory_compressed_data, :in_memory_last_modified
+    attr_accessor :in_memory_etag15, :in_memory_compressed_data15, :in_memory_last15_modified
     attr_accessor :last_redis_check
+    attr_accessor :last_redis15_check
     attr_accessor :app_initialized
     attr_accessor :cron_interval
   end
