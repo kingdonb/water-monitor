@@ -60,11 +60,11 @@ While the application is functional, there are several areas identified for impr
 1. ~~Improve the resilience of Redis subscriptions to handle disconnections and reconnections gracefully.~~
 -->
 
-1. The cron thread has a handle `cron_interval` which is never set (except in tests)
-1. The experimental 15 (2) minute wait publishes a message `please_update15_now` which is never received
+1. ~~The cron thread has a handle `cron_interval` which is never set (except in tests)~~
+1. ~~The experimental 15 (2) minute wait publishes a message `please_update15_now` which is never received~~
 1. (Based on the two issues above) clients should usually never see a 202 response
-1. Clients should be able to retrieve the data 5 seconds later, if the response is 202
-1. We should be tracking errors (202 is not an error unless ... see above)
+1. Clients should always be able to retrieve the data 5 seconds later, if the response is 202
+1. We should actually track errors (202 is an error if it lasts longer than 5s ... see above)
 
 These improvements will be addressed in future updates to enhance the reliability and maintainability of the application.
 
