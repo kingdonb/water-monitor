@@ -49,7 +49,7 @@ module CacheHelpers
         erro("Error fetching data: #{response.code} #{response.message}")
         nil
       end
-    rescue => e
+    rescue StandardError => e
       erro("Exception while fetching data: #{e.message}")
       nil
     end
@@ -77,7 +77,7 @@ module CacheHelpers
       end
 
       true
-    rescue => e
+    rescue StandardError => e
       erro("Error checking cache readiness: #{e.message}")
       false
     end

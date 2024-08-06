@@ -30,7 +30,7 @@ class MyApp < Sinatra::Base
       body "Cache is updating, please try again later."
     end
     # log_request(request: request, response: response, data_sent: false, compressed: false)
-  rescue => e
+  rescue StandardError => e
     settings.state_manager.increment_error_count
     handle_data_error(e)
   end
@@ -61,7 +61,7 @@ class MyApp < Sinatra::Base
     end
 
     serve_appropriate_response
-  rescue => e
+  rescue StandardError => e
     handle_serve_error(e)
   end
 
@@ -126,7 +126,7 @@ class MyApp < Sinatra::Base
 
     status 202
     body "Cache is updating, please try again later."
-  rescue => e
+  rescue StandardError => e
     erro("Error requesting cache update: #{e.message}")
     status 202  # Keep the 202 status even if there's an error
     body "Cache is updating, please try again later."
@@ -180,7 +180,7 @@ class MyApp < Sinatra::Base
         rescue Redis::BaseConnectionError, SocketError => e
           settings.state_manager.update_redis_status(:disconnected)
           erro("Redis health check failed: #{e.message}")
-        rescue => e
+        rescue StandardError => e
           settings.state_manager.update_redis_status(:error)
           erro("Unexpected error in Redis health check: #{e.message}")
         end
@@ -261,7 +261,7 @@ class MyApp < Sinatra::Base
       rescue Redis::BaseConnectionError, EOFError => e
         erro("Redis connection error in listener thread: #{e.message}")
         settings.state_manager.update_redis_status(:disconnected)
-      rescue => e
+      rescue StandardError => e
         erro("Failed to subscribe to Redis channel: #{e.message}")
         erro(e.backtrace.join("\n"))
         settings.state_manager.update_redis_status(:error)
