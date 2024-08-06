@@ -190,7 +190,7 @@ module CacheHelpers
       @in_memory_last15_modified = current_time
 
       # Update cache status to ready after successful update
-      settings.state_manager.update_cache_status(:ready)
+      settings.state_manager.update_cache15_status(:ready)
 
       debu("Cache15 updated, new value size: #{json_data.bytesize} bytes, compressed size: #{compressed_data.bytesize} bytes")
       release_lock
