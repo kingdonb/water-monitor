@@ -102,6 +102,7 @@ class MyApp < Sinatra::Base
   def handle_serve_error(error)
     erro("Error serving cached data: #{error.message}")
     status 500
+    settings.state_manager.update_cache_status(:error)
     body "An error occurred while processing your request."
     log_request(request: request, response: response, data_sent: false, compressed: false)
   end
