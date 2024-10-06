@@ -55,6 +55,14 @@ module CacheHelpers
     end
 
     def cache_ready?
+
+      health_status = settings.state_manager.health_check
+      if health_status == :error
+        settings.state_manager.update_cache_status(:updating)
+        request_cache_update
+        return false
+      end
+
       current_time = Time.now
       if @last_redis_check.nil? || current_time - @last_redis_check > 5 || ENV['RACK_ENV'] == 'test'
         with_redis do |redis|
