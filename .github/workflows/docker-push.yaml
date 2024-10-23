@@ -52,7 +52,7 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository }}/myapp:${{ env.BUILD_ID }}
+          tags: ghcr.io/${{ github.repository }}/myapp:${{ steps.prep.outputs.BUILD_ID }}
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
