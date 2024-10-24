@@ -2,7 +2,7 @@ apiVersion: image.toolkit.fluxcd.io/v1beta2
 kind: ImageRepository
 metadata:
   name: myapp
-  namespace: test-yebyen
+  namespace: water
 spec:
   image: ghcr.io/kingdonb/water-monitor/myapp
   interval: 5m
