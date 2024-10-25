@@ -57,6 +57,3 @@ jobs:
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Post build image digest
-        run: echo "Image digest: ${{ steps.build-push.outputs.digest }}"
