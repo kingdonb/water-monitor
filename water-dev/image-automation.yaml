@@ -34,7 +34,7 @@ spec:
       author:
         email: kingdon+fluxcd@nerdland.info
         name: FluxImageAutomation
-  interval: 1m0s
+  interval: 10m0s
   sourceRef:
     kind: GitRepository
     name: cozy-fluxcd
