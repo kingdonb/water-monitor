@@ -1,7 +1,7 @@
 apiVersion: image.toolkit.fluxcd.io/v1beta2
 kind: ImagePolicy
 metadata:
-  name: image-repo-policy
+  name: dev-policy
   namespace: water
 spec:
   imageRepositoryRef:

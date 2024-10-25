@@ -64,7 +64,7 @@ spec:
             secretKeyRef:
               key: workflow-release-summary
               name: water-secret
-        image: ghcr.io/kingdonb/water-monitor/myapp:latest # {"$imagepolicy": "test-yebyen:image-repo-policy"}
+        image: ghcr.io/kingdonb/water-monitor/myapp:latest # {"$imagepolicy": "water:prod-policy"}
         imagePullPolicy: Always
         livenessProbe:
           failureThreshold: 1
