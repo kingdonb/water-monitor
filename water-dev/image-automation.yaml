@@ -1,0 +1,21 @@
+---
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageUpdateAutomation
+metadata:
+  name: water-monitor
+  namespace: cozy-fluxcd
+spec:
+  update:
+    path: water-dev
+  git:
+    checkout:
+      ref:
+        branch: main
+    commit:
+      author:
+        email: kingdon+fluxcd@nerdland.info
+        name: FluxImageAutomation
+  interval: 1m0s
+  sourceRef:
+    kind: GitRepository
+    name: cozy-fluxcd
