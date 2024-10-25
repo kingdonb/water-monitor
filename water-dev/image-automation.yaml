@@ -5,25 +5,6 @@ metadata:
   name: water-monitor
   namespace: cozy-fluxcd
 spec:
-  commit:
-    messageTemplate: |
-      [skip ci] Automated image update
-
-      Automation name: {{ .AutomationObject }}
-
-      Files:
-      {{ range $filename, $_ := .Changed.FileChanges -}}
-      - {{ $filename }}
-      {{ end -}}
-
-      Objects:
-      {{ range $resource, $changes := .Changed.Objects -}}
-      - {{ $resource.Kind }} {{ $resource.Name }}
-        Changes:
-      {{- range $_, $change := $changes }}
-          - {{ $change.OldValue }} -> {{ $change.NewValue }}
-      {{ end -}}
-      {{ end -}}
   update:
     path: water-dev
   git:
@@ -34,6 +15,24 @@ spec:
       author:
         email: kingdon+fluxcd@nerdland.info
         name: FluxImageAutomation
+      messageTemplate: |
+        [skip ci] Automated image update
+
+        Automation name: {{ .AutomationObject }}
+
+        Files:
+        {{ range $filename, $_ := .Changed.FileChanges -}}
+        - {{ $filename }}
+        {{ end -}}
+
+        Objects:
+        {{ range $resource, $changes := .Changed.Objects -}}
+        - {{ $resource.Kind }} {{ $resource.Name }}
+          Changes:
+        {{- range $_, $change := $changes }}
+            - {{ $change.OldValue }} -> {{ $change.NewValue }}
+        {{ end -}}
+        {{ end -}}
   interval: 10m0s
   sourceRef:
     kind: GitRepository
