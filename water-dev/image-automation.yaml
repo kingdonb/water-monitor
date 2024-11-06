@@ -36,4 +36,4 @@ spec:
   interval: 10m0s
   sourceRef:
     kind: GitRepository
-    name: cozy-fluxcd
+    name: water-dev
