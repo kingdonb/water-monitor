@@ -64,7 +64,7 @@ spec:
             secretKeyRef:
               key: workflow-release-summary
               name: water-secret
-        image: ghcr.io/kingdonb/water-monitor/myapp:main-33fb9101-1730990795 # {"$imagepolicy": "cozy-fluxcd:dev-policy"}
+        image: ghcr.io/kingdonb/water-monitor/myapp:main-d742f01f-1730991170 # {"$imagepolicy": "cozy-fluxcd:dev-policy"}
         imagePullPolicy: Always
         livenessProbe:
           failureThreshold: 1
