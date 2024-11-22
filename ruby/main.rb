@@ -25,6 +25,9 @@ if __FILE__ == $0
   # Tell the cron_thread how often it should fire
   MyApp.cron_interval = CacheHelpers::CACHE_DURATION
 
+  MyApp.cron_interval = CacheHelpers::CACHE_DURATION
+  MyApp.cron15_interval = CacheHelpers::CACHE_2_DURATION
+
   # Start background threads
   MyApp.start_threads
 
