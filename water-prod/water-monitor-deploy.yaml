@@ -5,7 +5,7 @@ metadata:
     app: water
     type: cmd
   name: water-cmd
-  namespace: water
+  namespace: tenant-test
 spec:
   progressDeadlineSeconds: 600
   replicas: 4
@@ -25,7 +25,6 @@ spec:
         app: water
         type: cmd
       name: water-cmd
-      namespace: water
     spec:
       containers:
       - env:
@@ -90,7 +89,7 @@ metadata:
   labels:
     app: water
   name: water
-  namespace: water
+  namespace: tenant-test
 spec:
   ports:
   - name: http
