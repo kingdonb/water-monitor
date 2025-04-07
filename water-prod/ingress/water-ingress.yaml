@@ -2,9 +2,9 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: water
-  namespace: tenant-test
+  namespace: water
 spec:
-  ingressClassName: tenant-test
+  ingressClassName: nginx
   rules:
   - host: water.teamhephy.info
     http:

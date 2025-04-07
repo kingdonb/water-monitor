@@ -1,17 +1,17 @@
-# apiVersion: fluxcd.controlplane.io/v1
-# kind: FluxInstance
-# metadata:
-#  name: flux
-#  namespace: cozy-fluxcd
-#  annotations:
-#   fluxcd.controlplane.io/reconcile: "enabled"
-#   fluxcd.controlplane.io/reconcileEvery: "1h"
-#   fluxcd.controlplane.io/reconcileTimeout: "3m"
-#   kustomize.toolkit.fluxcd.io/ssa: merge
-# spec:
-#   sync:
-#     interval: 1m
-#     kind: GitRepository
-#     path: ./water-prod
-#     ref: refs/heads/main
-#     url: https://github.com/kingdonb/water-monitor.git
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxInstance
+metadata:
+ name: flux
+ namespace: cozy-fluxcd
+ annotations:
+  fluxcd.controlplane.io/reconcile: "enabled"
+  fluxcd.controlplane.io/reconcileEvery: "1h"
+  fluxcd.controlplane.io/reconcileTimeout: "3m"
+  kustomize.toolkit.fluxcd.io/ssa: merge
+spec:
+  sync:
+    interval: 1m
+    kind: GitRepository
+    path: ./water-prod
+    ref: refs/heads/main
+    url: https://github.com/kingdonb/water-monitor.git
