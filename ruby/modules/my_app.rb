@@ -39,6 +39,31 @@ class MyApp < Sinatra::Base
     handle_data_request
   end
 
+  def handle_data15_request
+    health_status = settings.state_manager.health_check
+    if health_status[:redis_status] != :connected
+      status 503
+      body "Service temporarily unavailable due to database connection issues."
+      log_request(request: request, response: response, data_sent: false, compressed: false)
+    elsif self.class.cache15_ready?
+      settings.state_manager.update_cache15_status(:ready)
+      serve_cached_data15
+    else
+      settings.state_manager.update_cache15_status(:updating)
+      request_cache15_update
+      status 202
+      body "Cache is updating, please try again later."
+    end
+    # log_request(request: request, response: response, data_sent: false, compressed: false)
+  rescue StandardError => e
+    settings.state_manager.increment_error_count
+    handle_data_error(e)
+  end
+
+  get '/data15' do
+    handle_data15_request
+  end
+
   get '/test' do
     'Test route'
   end
@@ -65,6 +90,20 @@ class MyApp < Sinatra::Base
     handle_serve_error(e)
   end
 
+  def serve_cached_data15
+    set_response15_headers
+
+    if client_cache15_valid?(self.class.in_memory_etag15)
+      status 304
+      log_request(request: request, response: response, data_sent: false, compressed: false)
+      return
+    end
+
+    serve_appropriate_response15
+  rescue StandardError => e
+    handle_serve_error(e)
+  end
+
   private
 
   def set_response_headers
@@ -76,11 +115,28 @@ class MyApp < Sinatra::Base
     headers['Vary'] = 'Accept-Encoding'
   end
 
+  def set_response15_headers
+    content_type :json
+    headers['ETag'] = self.class.in_memory_etag15
+    headers['Last-Modified'] = self.class.in_memory_last15_modified
+    headers['Cache-Control'] = CACHE_15_CONTROL_HEADER
+    headers['Access-Control-Allow-Origin'] = '*'
+    headers['Vary'] = 'Accept-Encoding'
+  end
+
   def serve_appropriate_response
     if client_accepts_gzip?
       serve_compressed_response
     else
       serve_uncompressed_response
+    end
+  end
+
+  def serve_appropriate_response15
+    if client_accepts_gzip?
+      serve_compressed_response15
+    else
+      serve_uncompressed_response15
     end
   end
 
@@ -94,8 +150,19 @@ class MyApp < Sinatra::Base
     log_request(request: request, response: response, data_sent: true, compressed: true)
   end
 
+  def serve_compressed_response15
+    headers['Content-Encoding'] = GZIP_ENCODING
+    body self.class.in_memory_compressed_data15.to_s
+    log_request(request: request, response: response, data_sent: true, compressed: true)
+  end
+
   def serve_uncompressed_response
     body Zlib::Inflate.inflate(self.class.in_memory_compressed_data.to_s)
+    log_request(request: request, response: response, data_sent: true, compressed: false)
+  end
+
+  def serve_uncompressed_response15
+    body Zlib::Inflate.inflate(self.class.in_memory_compressed_data15.to_s)
     log_request(request: request, response: response, data_sent: true, compressed: false)
   end
 
@@ -118,6 +185,32 @@ class MyApp < Sinatra::Base
     end
   end
 
+  def client_cache15_valid?(etag)
+    client_etag = request.env['HTTP_IF_NONE_MATCH']
+    if client_etag && client_etag == etag
+      debu("Cache hit: Client cache15 is still valid, returning 304")
+      true
+    else
+      debu("Cache miss: Client cache15 is stale or non-existent")
+      false
+    end
+  end
+
+  def request_cache15_update
+    debu("Cache15 not ready or contains test data, publishing please_update15_now message")
+    with_redis { |redis| redis.publish("please_update15_now", "true") }
+
+    # Update cache status to updating while the cache is being warmed
+    settings.state_manager.update_cache15_status(:updating)
+
+    status 202
+    body "Cache15 is updating, please try again later."
+  rescue StandardError => e
+    erro("Error requesting cache15 update: #{e.message}")
+    status 202  # Keep the 202 status even if there's an error
+    body "Cache15 is updating, please try again later."
+  end
+
   def request_cache_update
     debu("Cache not ready or contains test data, publishing please_update_now message")
     with_redis { |redis| redis.publish("please_update_now", "true") }
@@ -137,9 +230,12 @@ class MyApp < Sinatra::Base
     include Loggable
     attr_accessor :redis_pool, :lock_key, :cache_key, :lock_cv, :lock_mutex
     attr_accessor :in_memory_etag, :in_memory_compressed_data, :in_memory_last_modified
+    attr_accessor :in_memory_etag15, :in_memory_compressed_data15, :in_memory_last15_modified
     attr_accessor :last_redis_check
+    attr_accessor :last_redis15_check
     attr_accessor :app_initialized
     attr_accessor :cron_interval
+    attr_accessor :cron15_interval
   end
 
   def self.initialize_app(redis_url = nil)
@@ -249,13 +345,34 @@ class MyApp < Sinatra::Base
       redis.close if redis
     end
 
+    @cron15_thread = Thread.new do
+      set_log_level(current_log_level)
+      debu("Starting cron15_thread")
+      redis = Redis.new
+      loop do
+        if cache15_ready?
+          debu("Cache is ready, no update needed in cron15_thread")
+          settings.state_manager.update_cache15_status(:ready)
+        elsif acquire_lock
+          debu("Lock acquired in cron15_thread, updating cache")
+          update_cache15
+        else
+          debu("Failed to acquire lock in cron15_thread")
+        end
+        sleep cron15_interval
+        debu("cron15_thread woke up")
+      end
+    ensure
+      redis.close if redis
+    end
+
     @listener_thread = Thread.new do
       set_log_level(current_log_level)
       debu("Starting listener_thread")
       begin
         redis = Redis.new # New connection for this thread
-        redis.subscribe("please_update_now") do |on|
-          on.message do |channel, message|
+        redis.psubscribe("please_update*_now") do |on|
+          on.pmessage do |_pattern, channel, message|
             on_message(channel, message)
           end
         end
@@ -278,6 +395,7 @@ class MyApp < Sinatra::Base
   def self.shutdown
     debu("Shutting down background threads")
     @cron_thread.kill if @cron_thread
+    @cron15_thread.kill if @cron15_thread
     @listener_thread.kill if @listener_thread
     info("Gracefully shutting down...")
     exit
@@ -289,6 +407,13 @@ class MyApp < Sinatra::Base
       if self.acquire_lock
         debu("Lock acquired in listener thread, updating cache")
         self.update_cache
+      else
+        debu("Failed to acquire lock in listener thread")
+      end
+    elsif channel == "please_update15_now" && message == "true"
+      if self.acquire_lock
+        debu("Lock acquired in listener thread, updating cache15")
+        self.update_cache15
       else
         debu("Failed to acquire lock in listener thread")
       end
