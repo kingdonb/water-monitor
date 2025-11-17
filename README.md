@@ -1,5 +1,6 @@
 # Hello RubyConf Chicago 2024!
-WIP - this is a polyglot codebase (with one main language currently, Ruby)
+
+Archived - this talk didn't get accepted! :)
 
 ## Project Overview
 
